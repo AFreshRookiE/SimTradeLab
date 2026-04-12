@@ -36,8 +36,6 @@ coverage.xml
 env/
 venv/
 ENV/
-env.bak/
-venv.bak/
 
 # IDE
 .vscode/
@@ -48,31 +46,26 @@ venv.bak/
 
 # OS
 .DS_Store
-.DS_Store?
-._*
-.Spotlight-V100
-.Trashes
-ehthumbs.db
 Thumbs.db
 
 # Project specific
-pickles_test/
-temp_*.py
-reports/
-!reports/.gitkeep
-
-# Logs
+output/
+strategies/
 *.log
 logs/
-backtest*.json
+*.db
+*.ptp
+*.parquet
+config/etfquant.yaml
 
-*.png
-!docs/sponsor/*.png
-*.gz
+# Data (large files, not for git)
+data*/
+
+# Export script output
+export_nav_premium.py
+
+# AI assistant files
 CLAUDE.md
 GEMINI.md
-.pre-commit-config.yaml
-strategies/*
-data*/
 .claude
-*.ipynb
+.trae/
