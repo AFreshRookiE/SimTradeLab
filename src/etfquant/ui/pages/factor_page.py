@@ -552,6 +552,53 @@ def create_factor_page(config: ETFQuantConfig) -> None:
                     screen_result.text = "因子库为空，请先生成因子"
                     screen_result.style("color: #f85149")
                     return
+                screen_result.text = "⏳ 正在筛选因子..."
+                screen_result.style("color: #58a6ff")
+
+                async def _run():
+                    import asyncio
+                    loop = asyncio.get_event_loop()
+                    selected = await loop.run_in_executor(None, _do_screen)
+                    if selected is None:
+                        return
+                    selected_names = [s["name"] for s in selected]
+                    svc.save_screen_result(
+                        ic_threshold=s_ic.value,
+                        icir_threshold=s_icir.value,
+                        mutual_ic_threshold=s_mutual.value,
+                        max_factors=int(s_max.value),
+                        selected_names=selected_names,
+                    )
+                    selected_name_set = set(selected_names)
+                    rows = []
+                    for f in all_factors:
+                        rows.append({
+                            "name": f["name"],
+                            "ic": f"{f.get('ic', 0):.4f}",
+                            "rank_ic": f"{f.get('rank_ic', 0):.4f}",
+                            "icir": f"{f.get('icir', 0):.4f}",
+                            "selected": "✅" if f["name"] in selected_name_set else "❌",
+                        })
+                    screen_table.rows = rows
+                    report = screen_instance.get_screening_report(all_factors, selected)
+                    screen_result.text = (
+                        f"✅ 筛选完成: IC筛选{report['ic_filtered']}/{len(all_factors)} → "
+                        f"ICIR筛选{report['icir_filtered']}/{report['ic_filtered']} → "
+                        f"去相关{len(selected)}/{report['icir_filtered']} → "
+                        f"最终{len(selected)}个因子入选 "
+                        f"（平均IC={report['selected_avg_ic']:.4f}, 平均ICIR={report['selected_avg_icir']:.2f}，结果已保存供模型训练使用）"
+                    )
+                    screen_result.style("color: #3fb950")
+
+                def _do_screen():
+                    try:
+                        return screen_instance.screen(all_factors)
+                    except Exception as e:
+                        logger.error("因子筛选异常: %s", e)
+                        screen_result.text = f"❌ 筛选失败: {e}"
+                        screen_result.style("color: #f85149")
+                        return None
+
                 from etfquant.core.config import FactorScreenConfig
                 from etfquant.data.bridge import DataBridge
                 screen_config = FactorScreenConfig(
@@ -562,35 +609,8 @@ def create_factor_page(config: ETFQuantConfig) -> None:
                 )
                 bridge = DataBridge(config.data)
                 screen_instance = FactorScreener(screen_config, data_bridge=bridge)
-                selected = screen_instance.screen(all_factors)
-                selected_names = [s["name"] for s in selected]
-                svc.save_screen_result(
-                    ic_threshold=s_ic.value,
-                    icir_threshold=s_icir.value,
-                    mutual_ic_threshold=s_mutual.value,
-                    max_factors=int(s_max.value),
-                    selected_names=selected_names,
-                )
-                selected_name_set = set(selected_names)
-                rows = []
-                for f in all_factors:
-                    rows.append({
-                        "name": f["name"],
-                        "ic": f"{f.get('ic', 0):.4f}",
-                        "rank_ic": f"{f.get('rank_ic', 0):.4f}",
-                        "icir": f"{f.get('icir', 0):.4f}",
-                        "selected": "✅" if f["name"] in selected_name_set else "❌",
-                    })
-                screen_table.rows = rows
-                report = screen_instance.get_screening_report(all_factors, selected)
-                screen_result.text = (
-                    f"✅ 筛选完成: IC筛选{report['ic_filtered']}/{len(all_factors)} → "
-                    f"ICIR筛选{report['icir_filtered']}/{report['ic_filtered']} → "
-                    f"去相关{len(selected)}/{report['icir_filtered']} → "
-                    f"最终{len(selected)}个因子入选 "
-                    f"（平均IC={report['selected_avg_ic']:.4f}, 平均ICIR={report['selected_avg_icir']:.2f}，结果已保存供模型训练使用）"
-                )
-                screen_result.style("color: #3fb950")
+
+                asyncio.get_event_loop().create_task(_run())
 
         with ui.tab_panel("train"):
             with ui.card().classes("full-width q-mb-md"):

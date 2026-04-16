@@ -16,21 +16,17 @@ logger = get_logger("etfquant.ml.screener")
 
 
 class FactorScreener:
-    """因子筛选器，三级漏斗：IC筛选 → ICIR筛选 → 去相关筛选。
+    """因子筛选器，三级漏斗：IC筛选 → ICIR筛选 → 去相关筛选。"""
 
-    去相关判定：计算两个因子在截面上的相关系数，若 |corr| > mutual_ic_threshold
-    则视为相似因子，只保留IC绝对值更高的。这比用IC值比例更科学——
-    IC值比例只能判断"两个因子的IC大小是否接近"，而相关系数能判断
-    "两个因子是否在说同一件事"。
-    """
     def __init__(self, config: FactorScreenConfig, data_bridge: DataBridge | None = None) -> None:
         self._config = config
         self._bridge = data_bridge
+        self._value_cache: dict[str, pd.DataFrame | None] = {}
 
-    def screen(self, factors: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def screen(self, factors: list[dict[str, Any]], progress_callback: Any | None = None) -> list[dict[str, Any]]:
         ic_filtered = self._filter_by_ic(factors)
         icir_filtered = self._filter_by_icir(ic_filtered)
-        decorrelated = self._decorrelate(icir_filtered)
+        decorrelated = self._decorrelate(icir_filtered, progress_callback)
         return decorrelated[: self._config.max_factors]
 
     def _filter_by_ic(self, factors: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -54,36 +50,65 @@ class FactorScreener:
         logger.info("ICIR筛选: %d/%d 因子通过", len(result), len(factors))
         return result
 
-    def _decorrelate(self, factors: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def _decorrelate(self, factors: list[dict[str, Any]], progress_callback: Any | None = None) -> list[dict[str, Any]]:
         if len(factors) <= 1:
             return factors
 
+        use_value_corr = self._bridge is not None
+        if use_value_corr:
+            logger.info("预计算因子值用于去相关（缓存模式）...")
+            self._prefetch_factor_values(factors)
+
         factors_sorted = sorted(factors, key=lambda f: abs(f.get("ic") or 0), reverse=True)
         selected: list[dict[str, Any]] = [factors_sorted[0]]
+        total = len(factors_sorted) - 1
 
-        for f in factors_sorted[1:]:
+        for i, f in enumerate(factors_sorted[1:]):
             if len(selected) >= self._config.max_factors:
                 break
             if self._is_low_correlation(f, selected):
                 selected.append(f)
+            if progress_callback and total > 0:
+                progress_callback(i + 1, total)
 
         logger.info("去相关筛选: %d/%d 因子入选", len(selected), len(factors))
         return selected
 
+    def _prefetch_factor_values(self, factors: list[dict[str, Any]]) -> None:
+        from etfquant.alpha.calculator import ETFAlphaCalculator
+        from etfquant.core.config import AlphaConfig
+
+        if not self._bridge:
+            return
+
+        cfg = AlphaConfig(max_etf_for_ic=50)
+        calc = ETFAlphaCalculator(self._bridge, cfg)
+        codes = self._bridge.list_etf_codes()[:cfg.max_etf_for_ic]
+
+        for f in factors:
+            expr = f.get("expression", "")
+            if expr in self._value_cache:
+                continue
+            frames: dict[str, pd.Series] = {}
+            for code in codes:
+                try:
+                    vals = calc._evaluate_expression(expr, code)
+                    if vals is not None:
+                        frames[code] = vals.rename(code)
+                except Exception:
+                    continue
+            self._value_cache[expr] = pd.DataFrame(frames) if frames else None
+
     def _is_low_correlation(self, candidate: dict[str, Any], selected: list[dict[str, Any]]) -> bool:
-        c_ic = candidate.get("ic") or 0
-        s_ic_first = selected[0].get("ic") or 0
-
-        ic_sign_match = (c_ic > 0 and s_ic_first > 0) or (c_ic < 0 and s_ic_first < 0)
-        ic_ratio = min(abs(c_ic), abs(s_ic_first)) / (max(abs(c_ic), abs(s_ic_first)) + 1e-10)
-
         if self._bridge is not None:
             return self._is_low_correlation_by_value(candidate, selected)
+
+        c_ic = candidate.get("ic") or 0
+        c_ric = candidate.get("rank_ic") or 0
 
         for s in selected:
             s_ic = s.get("ic") or 0
             s_ric = s.get("rank_ic") or 0
-            c_ric = candidate.get("rank_ic") or 0
 
             ic_sign = (c_ic > 0 and s_ic > 0) or (c_ic < 0 and s_ic < 0)
             ic_r = min(abs(c_ic), abs(s_ic)) / (max(abs(c_ic), abs(s_ic)) + 1e-10)
@@ -95,47 +120,20 @@ class FactorScreener:
         return True
 
     def _is_low_correlation_by_value(self, candidate: dict[str, Any], selected: list[dict[str, Any]]) -> bool:
-        """用因子值计算截面相关系数判定相似性（更科学）。"""
-        from etfquant.alpha.calculator import ETFAlphaCalculator
-        from etfquant.core.config import AlphaConfig
-
-        if not self._bridge:
-            return True
-
-        cfg = AlphaConfig(max_etf_for_ic=200)
-        calc = ETFAlphaCalculator(self._bridge, cfg)
-        codes = self._bridge.list_etf_codes()[:cfg.max_etf_for_ic]
-
         c_expr = candidate.get("expression", "")
-        c_factor_frames: dict[str, pd.Series] = {}
-        for code in codes:
-            try:
-                vals = calc._evaluate_expression(c_expr, code)
-                if vals is not None:
-                    c_factor_frames[code] = vals.rename(code)
-            except Exception:
-                continue
-        if not c_factor_frames:
+        c_df = self._value_cache.get(c_expr)
+        if c_df is None or c_df.empty:
             return True
-        c_df = pd.DataFrame(c_factor_frames)
 
         for s in selected:
             s_expr = s.get("expression", "")
-            s_factor_frames: dict[str, pd.Series] = {}
-            for code in codes:
-                try:
-                    vals = calc._evaluate_expression(s_expr, code)
-                    if vals is not None:
-                        s_factor_frames[code] = vals.rename(code)
-                except Exception:
-                    continue
-            if not s_factor_frames:
+            s_df = self._value_cache.get(s_expr)
+            if s_df is None or s_df.empty:
                 continue
-            s_df = pd.DataFrame(s_factor_frames)
 
             common_cols = c_df.columns.intersection(s_df.columns)
             common_idx = c_df.index.intersection(s_df.index)
-            if len(common_cols) < 10 or len(common_idx) < 20:
+            if len(common_cols) < 5 or len(common_idx) < 10:
                 continue
 
             corr_values: list[float] = []
@@ -143,7 +141,7 @@ class FactorScreener:
                 c_row = c_df.loc[date, common_cols].dropna()
                 s_row = s_df.loc[date, common_cols].dropna()
                 common = c_row.index.intersection(s_row.index)
-                if len(common) < 10:
+                if len(common) < 5:
                     continue
                 c_vals = c_row[common].values
                 s_vals = s_row[common].values
