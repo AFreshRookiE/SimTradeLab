@@ -210,17 +210,18 @@ def create_factor_page(config: ETFQuantConfig) -> None:
 
             factor_table = ui.table(
                 columns=[
-                    {"name": "name", "label": "因子名", "field": "name", "sortable": True, "align": "left", "width": "160px"},
-                    {"name": "ic", "label": "IC", "field": "ic", "sortable": True, "align": "right", "width": "80px"},
-                    {"name": "rank_ic", "label": "RankIC", "field": "rank_ic", "sortable": True, "align": "right", "width": "80px"},
-                    {"name": "icir", "label": "ICIR", "field": "icir", "sortable": True, "align": "right", "width": "80px"},
-                    {"name": "is_valid", "label": "有效性", "field": "is_valid", "align": "center", "width": "70px"},
-                    {"name": "category_label", "label": "分类", "field": "category_label", "sortable": True, "align": "center", "width": "90px"},
+                    {"name": "name", "label": "因子名", "field": "name", "sortable": True, "align": "left", "width": "120px"},
+                    {"name": "ic", "label": "IC", "field": "ic", "sortable": True, "align": "right", "width": "65px"},
+                    {"name": "rank_ic", "label": "RankIC", "field": "rank_ic", "sortable": True, "align": "right", "width": "65px"},
+                    {"name": "icir", "label": "ICIR", "field": "icir", "sortable": True, "align": "right", "width": "70px"},
+                    {"name": "is_valid", "label": "有效性", "field": "is_valid", "align": "center", "width": "60px"},
+                    {"name": "category_label", "label": "分类", "field": "category_label", "sortable": True, "align": "center", "width": "80px"},
+                    {"name": "updated_at", "label": "更新时间", "field": "updated_at", "sortable": True, "align": "center", "width": "140px"},
                 ],
                 rows=[],
                 row_key="name",
                 pagination={"rowsPerPage": 5, "rowsPerPageOptions": [5, 10, 20, 50]},
-            ).classes("full-width").on("rowClick", lambda e: _on_row_click(e), [[], ["name"], None])
+            ).classes("full-width").props("resizable-columns").on("rowClick", lambda e: _on_row_click(e), [[], ["name"], None])
 
             with ui.card().classes("full-width q-mt-md").style("border-radius: 12px !important; border: 1px solid #30363d !important;"):
                 detail_title = ui.label("📋 点击因子查看详情").classes("text-subtitle1 q-mb-sm").style("color: #58a6ff")
@@ -274,6 +275,10 @@ def create_factor_page(config: ETFQuantConfig) -> None:
                     r["icir"] = f"{r.get('icir') or 0:.4f}"
                     r["is_valid"] = "✅" if r.get("is_valid") else "❌"
                     r["category_label"] = _CATEGORY_LABELS.get(r.get("category", ""), r.get("category", ""))
+                    ts = r.get("updated_at", "")
+                    if "T" in ts:
+                        ts = ts.replace("T", " ")[:19]
+                    r["updated_at"] = ts
                 factor_table.rows = rows
                 valid_count = sum(1 for r in rows if r["is_valid"] == "✅")
                 pool_count_label.text = f"共 {len(rows)} 个因子，{valid_count} 个有效"
