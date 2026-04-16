@@ -129,48 +129,56 @@ class FactorStore:
             return count
 
     def list_all(self) -> list[dict[str, Any]]:
-        rows = self._conn.execute(
-            "SELECT name, expression, description, ic, rank_ic, icir, is_valid, category, params, created_at, updated_at FROM factors ORDER BY ABS(ic) DESC, ABS(icir) DESC"
-        ).fetchall()
-        return [self._row_to_dict(r) for r in rows]
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT name, expression, description, ic, rank_ic, icir, is_valid, category, params, created_at, updated_at FROM factors ORDER BY ABS(ic) DESC, ABS(icir) DESC"
+            ).fetchall()
+            return [self._row_to_dict(r) for r in rows]
 
     def list_valid(self) -> list[dict[str, Any]]:
-        rows = self._conn.execute(
-            "SELECT name, expression, description, ic, rank_ic, icir, is_valid, category, params, created_at, updated_at FROM factors WHERE is_valid=1 ORDER BY ABS(ic) DESC, ABS(icir) DESC"
-        ).fetchall()
-        return [self._row_to_dict(r) for r in rows]
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT name, expression, description, ic, rank_ic, icir, is_valid, category, params, created_at, updated_at FROM factors WHERE is_valid=1 ORDER BY ABS(ic) DESC, ABS(icir) DESC"
+            ).fetchall()
+            return [self._row_to_dict(r) for r in rows]
 
     def list_by_category(self, category: str) -> list[dict[str, Any]]:
-        rows = self._conn.execute(
-            "SELECT name, expression, description, ic, rank_ic, icir, is_valid, category, params, created_at, updated_at FROM factors WHERE category=? ORDER BY ABS(ic) DESC, ABS(icir) DESC",
-            (category,),
-        ).fetchall()
-        return [self._row_to_dict(r) for r in rows]
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT name, expression, description, ic, rank_ic, icir, is_valid, category, params, created_at, updated_at FROM factors WHERE category=? ORDER BY ABS(ic) DESC, ABS(icir) DESC",
+                (category,),
+            ).fetchall()
+            return [self._row_to_dict(r) for r in rows]
 
     def get(self, name: str) -> dict[str, Any] | None:
-        row = self._conn.execute(
-            "SELECT name, expression, description, ic, rank_ic, icir, is_valid, category, params, created_at, updated_at FROM factors WHERE name=?",
-            (name,),
-        ).fetchone()
-        return self._row_to_dict(row) if row else None
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT name, expression, description, ic, rank_ic, icir, is_valid, category, params, created_at, updated_at FROM factors WHERE name=?",
+                (name,),
+            ).fetchone()
+            return self._row_to_dict(row) if row else None
 
     def delete(self, name: str) -> bool:
-        cursor = self._conn.execute("DELETE FROM factors WHERE name=?", (name,))
-        self._conn.commit()
-        return cursor.rowcount > 0
+        with self._lock:
+            cursor = self._conn.execute("DELETE FROM factors WHERE name=?", (name,))
+            self._conn.commit()
+            return cursor.rowcount > 0
 
     def delete_invalid(self) -> int:
-        cursor = self._conn.execute("DELETE FROM factors WHERE is_valid=0")
-        self._conn.commit()
-        return cursor.rowcount
+        with self._lock:
+            cursor = self._conn.execute("DELETE FROM factors WHERE is_valid=0")
+            self._conn.commit()
+            return cursor.rowcount
 
     def count(self) -> int:
-        row = self._conn.execute("SELECT COUNT(*) FROM factors").fetchone()
-        return row[0]
+        with self._lock:
+            row = self._conn.execute("SELECT COUNT(*) FROM factors").fetchone()
+            return row[0]
 
     def count_valid(self) -> int:
-        row = self._conn.execute("SELECT COUNT(*) FROM factors WHERE is_valid=1").fetchone()
-        return row[0]
+        with self._lock:
+            row = self._conn.execute("SELECT COUNT(*) FROM factors WHERE is_valid=1").fetchone()
+            return row[0]
 
     def _row_to_dict(self, row: sqlite3.Row) -> dict[str, Any]:
         return {
@@ -205,29 +213,35 @@ class FactorStore:
             return cursor.lastrowid
 
     def get_latest_screen_result(self) -> dict[str, Any] | None:
-        row = self._conn.execute(
-            "SELECT * FROM screen_results ORDER BY created_at DESC LIMIT 1"
-        ).fetchone()
-        if not row:
-            return None
-        return {
-            "id": row["id"],
-            "created_at": row["created_at"],
-            "ic_threshold": row["ic_threshold"],
-            "icir_threshold": row["icir_threshold"],
-            "mutual_ic_threshold": row["mutual_ic_threshold"],
-            "max_factors": row["max_factors"],
-            "selected_names": json.loads(row["selected_names"]) if row["selected_names"] else [],
-            "selected_count": row["selected_count"],
-        }
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM screen_results ORDER BY created_at DESC LIMIT 1"
+            ).fetchone()
+            if not row:
+                return None
+            return {
+                "id": row["id"],
+                "created_at": row["created_at"],
+                "ic_threshold": row["ic_threshold"],
+                "icir_threshold": row["icir_threshold"],
+                "mutual_ic_threshold": row["mutual_ic_threshold"],
+                "max_factors": row["max_factors"],
+                "selected_names": json.loads(row["selected_names"]) if row["selected_names"] else [],
+                "selected_count": row["selected_count"],
+            }
 
     def get_selected_factor_expressions(self) -> list[dict[str, Any]]:
         latest = self.get_latest_screen_result()
         if not latest or not latest["selected_names"]:
             return []
-        placeholders = ",".join("?" for _ in latest["selected_names"])
-        rows = self._conn.execute(
-            f"SELECT name, expression, ic, rank_ic, icir FROM factors WHERE name IN ({placeholders})",
-            latest["selected_names"],
-        ).fetchall()
-        return [{"name": r["name"], "expression": r["expression"], "ic": r["ic"], "rank_ic": r["rank_ic"], "icir": r["icir"]} for r in rows]
+        with self._lock:
+            placeholders = ",".join("?" for _ in latest["selected_names"])
+            rows = self._conn.execute(
+                f"SELECT name, expression, ic, rank_ic, icir FROM factors WHERE name IN ({placeholders})",
+                latest["selected_names"],
+            ).fetchall()
+            found = len(rows)
+            expected = len(latest["selected_names"])
+            if found < expected:
+                logger.warning("筛选结果中%d个因子仅找到%d个（可能已被删除）", expected, found)
+            return [{"name": r["name"], "expression": r["expression"], "ic": r["ic"], "rank_ic": r["rank_ic"], "icir": r["icir"]} for r in rows]

@@ -7,6 +7,10 @@ from pathlib import Path
 
 from nicegui import ui
 
+from etfquant.core.logger import get_logger
+
+logger = get_logger("etfquant.ui.factor_page")
+
 from etfquant.core.config import ETFQuantConfig, ScheduleConfig
 from etfquant.api.factor import FactorService
 from etfquant.ml.factor_screener import FactorScreener
@@ -195,7 +199,6 @@ def create_factor_page(config: ETFQuantConfig) -> None:
         ui.tab("mining", label="因子挖掘")
         ui.tab("train", label="筛选与训练")
         ui.tab("schedule", label="定时任务")
-        ui.tab("operators", label="算子参考")
 
     with ui.tab_panels(tabs, value="pool").classes("full-width"):
         with ui.tab_panel("pool"):
@@ -339,6 +342,30 @@ def create_factor_page(config: ETFQuantConfig) -> None:
                     ui.button("📊 评估因子", on_click=lambda: _eval_custom(), color="primary").props("dense")
                 eval_result = ui.label("").classes("text-body2 q-mt-sm").style("color: #8b949e")
 
+            with ui.expansion("📖 算子参考与因子表达式指南", icon="help").classes("full-width q-mb-md").style("border: 1px solid #30363d; border-radius: 8px;"):
+                ui.markdown(
+                    "在上方自定义因子表达式中，你可以使用以下算子来组合出新的因子。\n\n"
+                    "**💡 写因子的思路：**\n"
+                    "1. 选一个你感兴趣的信号（如折溢价率、动量、波动率）\n"
+                    "2. 用时序算子加工（如求均值、排名、差值）\n"
+                    "3. 多个信号可以相乘、相加、相减\n"
+                    "4. 写好后点【评估因子】按钮，看 IC 是否 > 0.03\n\n"
+                    "**可用的行情变量：** `close`, `open`, `high`, `low`, `volume`, `amount`, `pct_chg`\n\n"
+                    "**可用的ETF变量：** `nav`（净值）, `iopv`（参考净值）, `index_close`（指数收盘价）\n\n"
+                    "**数学函数：** `abs()`, `log()`, `sign()`, `power(x, n)`, `max()`, `min()`"
+                ).style("color: #c9d1d9; font-size: 13px; line-height: 1.8;")
+                operators = svc.get_operators()
+                ui.table(
+                    columns=[
+                        {"name": "op", "label": "算子", "field": "op", "align": "left", "width": "180px"},
+                        {"name": "name", "label": "名称", "field": "name", "align": "left", "width": "100px"},
+                        {"name": "desc", "label": "说明", "field": "desc", "align": "left"},
+                        {"name": "example", "label": "示例", "field": "example", "align": "left", "width": "240px"},
+                        {"name": "tip", "label": "提示", "field": "tip", "align": "left", "width": "200px"},
+                    ],
+                    rows=operators,
+                ).classes("full-width")
+
             async def _generate():
                 gen_status.text = "⏳ 正在准备..."
                 gen_status.style("color: #58a6ff")
@@ -397,7 +424,7 @@ def create_factor_page(config: ETFQuantConfig) -> None:
                 eval_result.text = "⏳ 正在评估..."
                 eval_result.style("color: #58a6ff")
                 try:
-                    result = svc.evaluate_expression(expr)
+                    result = await asyncio.get_event_loop().run_in_executor(None, lambda: svc.evaluate_expression(expr))
                     ic = result.get("ic") or 0
                     ric = result.get("rank_ic") or 0
                     icir = result.get("icir") or 0
@@ -545,10 +572,42 @@ def create_factor_page(config: ETFQuantConfig) -> None:
                 ui.label("第二步：模型训练").classes("text-h6 q-mb-md").style("color: #58a6ff")
                 ui.label("基于筛选后的因子训练 XGBoost 预测模型。若已执行筛选，自动使用筛选结果；否则使用内置硬编码特征。训练完成后可在回测页使用。").classes("text-body2 q-mb-md").style("color: #8b949e")
                 with ui.row().classes("full-width items-end"):
-                    etf_count_input = ui.number(label="ETF数量", value=50, min=5, max=500).classes("q-mr-md")
-                    predict_input = ui.number(label="预测天数", value=config.ml.predict_days, min=1, max=20).classes("q-mr-md")
+                    etf_count_input = ui.number(label="ETF数量", value=50, min=5, max=500).classes("q-mr-md").style("min-width: 160px")
+                    predict_input = ui.number(label="预测天数", value=config.ml.predict_days, min=1, max=20).classes("q-mr-md").style("min-width: 160px")
                     ui.button("🤖 训练模型", on_click=lambda: _train_model(), color="primary").classes("q-mr-md")
                 train_status = ui.label("").classes("text-body2 q-mt-sm").style("color: #8b949e")
+
+            with ui.expansion("📖 模型训练参数说明", icon="help").classes("full-width q-mb-md").style("border: 1px solid #30363d; border-radius: 8px;"):
+                ui.markdown("""
+**模型训练参数说明：**
+
+| 参数 | 建议范围 | 说明 |
+|------|----------|------|
+| ETF数量 | 20~200 | 参与训练的ETF数量。越多样本越丰富但耗时越长。50=快速验证，100=标准训练，200=深度训练 |
+| 预测天数 | 1~20 | 模型预测未来N天的收益率。1=日频交易，5=周频交易（推荐），10=双周频，20=月频 |
+
+**训练流程：**
+1. 从因子筛选结果中读取入选因子表达式（若无筛选结果则使用内置硬编码特征）
+2. 对每只ETF计算因子值作为特征，计算未来N天收益率作为标签
+3. 按时间序列划分训练集(80%)和验证集(20%)
+4. 使用XGBoost回归模型训练，StandardScaler标准化特征
+5. 保存模型到本地，可在回测页加载使用
+
+**特征来源：**
+- **筛选因子**：若已执行因子筛选，自动使用筛选结果中的因子表达式计算特征值
+- **硬编码特征**：若未筛选，使用内置技术指标（收益率、均线、波动率、折溢价等）
+
+**预测天数选择建议：**
+- 1天：日频交易，换手率高，佣金成本大，适合大资金
+- 5天：**周频交易（推荐）**，换手率适中，佣金可控，适合中小资金
+- 10~20天：低频交易，信号少但稳定，适合长期持有
+
+**ETF数量选择建议：**
+- <20只：样本太少，模型容易过拟合
+- 50只：快速验证模型框架是否正常
+- 100只：标准训练，平衡速度与质量
+- 200只+：深度训练，耗时较长但模型更稳健
+""").style("color: #c9d1d9; font-size: 13px; line-height: 1.6;")
 
             with ui.card().classes("full-width"):
                 ui.label("已保存模型").classes("text-h6 q-mb-md").style("color: #58a6ff")
@@ -576,6 +635,8 @@ def create_factor_page(config: ETFQuantConfig) -> None:
                     loop = asyncio.get_event_loop()
                     selected = await loop.run_in_executor(None, _do_screen)
                     if selected is None:
+                        screen_result.text = "❌ 筛选失败，请查看终端日志"
+                        screen_result.style("color: #f85149")
                         return
                     selected_names = [s["name"] for s in selected]
                     svc.save_screen_result(
@@ -611,8 +672,6 @@ def create_factor_page(config: ETFQuantConfig) -> None:
                         return screen_instance.screen(all_factors)
                     except Exception as e:
                         logger.error("因子筛选异常: %s", e)
-                        screen_result.text = f"❌ 筛选失败: {e}"
-                        screen_result.style("color: #f85149")
                         return None
 
                 from etfquant.core.config import FactorScreenConfig
@@ -632,7 +691,9 @@ def create_factor_page(config: ETFQuantConfig) -> None:
                 train_status.text = "⏳ 正在准备训练数据..."
                 train_status.style("color: #58a6ff")
                 try:
-                    result = svc.train_model()
+                    result = await asyncio.get_event_loop().run_in_executor(
+                        None, lambda: svc.train_model(etf_count=int(etf_count_input.value), predict_days=int(predict_input.value))
+                    )
                     if result.get("success"):
                         feat_src = result.get("feature_source", "")
                         train_status.text = f"✅ 训练完成! 样本{result['train_samples']}+{result['val_samples']}, 特征{result['feature_count']}个({feat_src})"
@@ -769,28 +830,3 @@ def create_factor_page(config: ETFQuantConfig) -> None:
 
             _refresh_sched_status()
             _refresh_mining_log()
-
-        with ui.tab_panel("operators"):
-            ui.label("算子参考与因子表达式指南").classes("text-h6 q-mb-md").style("color: #58a6ff")
-            ui.markdown(
-                "在【因子生成】页面的自定义因子表达式中，你可以使用以下算子来组合出新的因子。\n\n"
-                "**💡 写因子的思路：**\n"
-                "1. 选一个你感兴趣的信号（如折溢价率、动量、波动率）\n"
-                "2. 用时序算子加工（如求均值、排名、差值）\n"
-                "3. 多个信号可以相乘、相加、相减\n"
-                "4. 写好后点【评估因子】按钮，看 IC 是否 > 0.03\n\n"
-                "**可用的行情变量：** `close`, `open`, `high`, `low`, `volume`, `amount`, `pct_chg`\n\n"
-                "**可用的ETF变量：** `nav`（净值）, `iopv`（参考净值）, `index_close`（指数收盘价）\n\n"
-                "**数学函数：** `abs()`, `log()`, `sign()`, `power(x, n)`, `max()`, `min()`"
-            ).style("color: #c9d1d9; font-size: 13px; line-height: 1.8;")
-            operators = svc.get_operators()
-            ui.table(
-                columns=[
-                    {"name": "op", "label": "算子", "field": "op", "align": "left", "width": "180px"},
-                    {"name": "name", "label": "名称", "field": "name", "align": "left", "width": "100px"},
-                    {"name": "desc", "label": "说明", "field": "desc", "align": "left"},
-                    {"name": "example", "label": "示例", "field": "example", "align": "left", "width": "240px"},
-                    {"name": "tip", "label": "提示", "field": "tip", "align": "left", "width": "200px"},
-                ],
-                rows=operators,
-            ).classes("full-width")

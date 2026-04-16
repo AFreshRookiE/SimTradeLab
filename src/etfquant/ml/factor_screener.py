@@ -34,7 +34,7 @@ class FactorScreener:
         for f in factors:
             ic = abs(f.get("ic") or 0)
             rank_ic = abs(f.get("rank_ic") or 0)
-            if ic >= self._config.ic_threshold or rank_ic >= self._config.ic_threshold:
+            if ic >= self._config.ic_threshold or rank_ic >= self._config.rank_ic_threshold:
                 result.append(f)
         logger.info("IC筛选: %d/%d 因子通过", len(result), len(factors))
         return result
@@ -45,7 +45,8 @@ class FactorScreener:
             icir = abs(f.get("icir") or 0)
             if icir >= self._config.icir_threshold:
                 result.append(f)
-        if not result:
+        if not result and factors:
+            logger.warning("ICIR筛选: 无因子通过阈值%.2f，取ICIR最高的10个", self._config.icir_threshold)
             result = sorted(factors, key=lambda f: abs(f.get("icir") or 0), reverse=True)[:10]
         logger.info("ICIR筛选: %d/%d 因子通过", len(result), len(factors))
         return result
@@ -102,20 +103,6 @@ class FactorScreener:
     def _is_low_correlation(self, candidate: dict[str, Any], selected: list[dict[str, Any]]) -> bool:
         if self._bridge is not None:
             return self._is_low_correlation_by_value(candidate, selected)
-
-        c_ic = candidate.get("ic") or 0
-        c_ric = candidate.get("rank_ic") or 0
-
-        for s in selected:
-            s_ic = s.get("ic") or 0
-            s_ric = s.get("rank_ic") or 0
-
-            ic_sign = (c_ic > 0 and s_ic > 0) or (c_ic < 0 and s_ic < 0)
-            ic_r = min(abs(c_ic), abs(s_ic)) / (max(abs(c_ic), abs(s_ic)) + 1e-10)
-            ric_r = min(abs(c_ric), abs(s_ric)) / (max(abs(c_ric), abs(s_ric)) + 1e-10)
-
-            if ic_sign and ic_r > self._config.mutual_ic_threshold and ric_r > self._config.mutual_ic_threshold:
-                return False
 
         return True
 

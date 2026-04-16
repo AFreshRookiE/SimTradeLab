@@ -331,12 +331,14 @@ class FactorService:
         df.to_parquet(save_path, index=False)
         return save_path
 
-    def train_model(self, etf_codes: list[str] | None = None) -> dict[str, Any]:
+    def train_model(self, etf_codes: list[str] | None = None, etf_count: int = 100, predict_days: int | None = None) -> dict[str, Any]:
         from etfquant.ml.trainer import ETFDataSource, FeatureEngineer, ModelTrainer
-        from etfquant.ml.factor_screener import FactorScreener
 
         if not self._ml_config:
             return {"success": False, "error": "ML配置未提供"}
+
+        if predict_days is not None:
+            self._ml_config.predict_days = predict_days
 
         bridge = DataBridge(self._data_config)
         ds = ETFDataSource(bridge, self._ml_config)
@@ -349,8 +351,8 @@ class FactorService:
 
         fe = FeatureEngineer(ds, self._ml_config, factor_expressions=factor_exprs if factor_exprs else None)
 
-        codes = etf_codes or ds.get_stock_list()[:100]
-        logger.info("开始训练模型: %d 只ETF, 特征来源=%s", len(codes), "筛选因子" if factor_exprs else "硬编码")
+        codes = etf_codes or ds.get_stock_list()[:etf_count]
+        logger.info("开始训练模型: %d 只ETF, 预测%d天, 特征来源=%s", len(codes), self._ml_config.predict_days, "筛选因子" if factor_exprs else "硬编码")
 
         X, y, dates = fe.build_dataset(codes)
         if X.empty:
