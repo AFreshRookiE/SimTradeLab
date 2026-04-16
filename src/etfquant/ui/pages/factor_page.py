@@ -193,8 +193,7 @@ def create_factor_page(config: ETFQuantConfig) -> None:
         ui.tab("pool", label="因子池")
         ui.tab("generate", label="因子评估")
         ui.tab("mining", label="因子挖掘")
-        ui.tab("screen", label="因子筛选")
-        ui.tab("train", label="模型训练")
+        ui.tab("train", label="筛选与训练")
         ui.tab("schedule", label="定时任务")
         ui.tab("operators", label="算子参考")
 
@@ -496,10 +495,10 @@ def create_factor_page(config: ETFQuantConfig) -> None:
 
                 asyncio.get_event_loop().run_in_executor(None, _run)
 
-        with ui.tab_panel("screen"):
+        with ui.tab_panel("train"):
             with ui.card().classes("full-width q-mb-md"):
-                ui.label("因子筛选配置").classes("text-h6 q-mb-md").style("color: #58a6ff")
-                ui.label("三级漏斗筛选：IC筛选 → ICIR筛选 → 去相关筛选。筛选结果自动保存，模型训练时会自动使用筛选后的因子作为特征，而非全部因子池。").classes("text-body2 q-mb-md").style("color: #8b949e")
+                ui.label("第一步：因子筛选").classes("text-h6 q-mb-md").style("color: #58a6ff")
+                ui.label("三级漏斗筛选：IC筛选 → ICIR筛选 → 去相关筛选。筛选结果自动保存，下方训练模型时会自动使用筛选后的因子作为特征。因子池不受影响，被筛掉的因子不会被删除。").classes("text-body2 q-mb-md").style("color: #8b949e")
                 with ui.row():
                     s_ic = ui.number(label="IC阈值", value=config.ml.factor_screen.ic_threshold, format="%.4f", step=0.01, min=0.0, max=1.0).classes("q-mr-md").style("min-width: 160px")
                     s_icir = ui.number(label="ICIR阈值", value=config.ml.factor_screen.icir_threshold, format="%.2f", step=0.1, min=0.0, max=10.0).classes("q-mr-md").style("min-width: 160px")
@@ -513,18 +512,12 @@ def create_factor_page(config: ETFQuantConfig) -> None:
 
 | 层级 | 参数 | 建议范围 | 说明 |
 |------|------|----------|------|
-| 第一级 | IC阈值 | 0.02~0.05 | 因子IC绝对值需超过此值。0.03=常规标准，0.05=严格标准。IC衡量因子预测收益方向的能力 |
-| 第二级 | ICIR阈值 | 0.3~1.0 | 因子ICIR绝对值需超过此值。0.5=稳定，1.0=非常稳定。ICIR=IC均值/IC标准差，衡量因子预测的稳定性 |
-| 第三级 | 互斥IC阈值 | 0.5~0.8 | 两因子截面相关系数超过此值则视为相似，只保留IC更高的。0.7=常规标准，0.5=严格去冗余 |
+| 第一级 | IC阈值 | 0.02~0.05 | 因子IC绝对值需超过此值。0.03=常规标准，0.05=严格标准 |
+| 第二级 | ICIR阈值 | 0.3~1.0 | 因子ICIR绝对值需超过此值。0.5=稳定，1.0=非常稳定 |
+| 第三级 | 互斥IC阈值 | 0.5~0.8 | 两因子截面相关系数超过此值则视为相似，只保留IC更高的 |
 | 最终 | 最大因子数 | 10~30 | 最终保留的因子数量上限。太多会过拟合，太少信息不足 |
 
-**筛选结果用途：**
-1. **模型训练**：筛选后的因子会自动作为XGBoost模型的特征输入，替代硬编码特征
-2. **因子去冗余**：去除实质相同的因子（如`close/ts_mean(close,20)`和`1/ma_ratio-1`），避免多重共线性
-3. **降低过拟合**：从69个因子中精选10-30个高质量、低相关的因子，比用全部因子训练更稳健
-
 **互斥IC阈值详解：**
-- 计算两个因子在截面上的实际值相关系数（不是IC值比例）
 - |corr| > 0.7 → 两个因子在说同一件事，只保留IC更高的
 - |corr| < 0.5 → 两个因子提供不同维度的信息，都保留
 - 设得太低(如0.3)会过度去冗余，可能丢失互补信息
@@ -545,6 +538,29 @@ def create_factor_page(config: ETFQuantConfig) -> None:
                 row_key="name",
                 pagination={"rowsPerPage": 20, "rowsPerPageOptions": [10, 20, 50, 100]},
             ).classes("full-width").props('resizable-columns separator="cell"')
+
+            ui.separator().classes("q-my-lg")
+
+            with ui.card().classes("full-width q-mb-md"):
+                ui.label("第二步：模型训练").classes("text-h6 q-mb-md").style("color: #58a6ff")
+                ui.label("基于筛选后的因子训练 XGBoost 预测模型。若已执行筛选，自动使用筛选结果；否则使用内置硬编码特征。训练完成后可在回测页使用。").classes("text-body2 q-mb-md").style("color: #8b949e")
+                with ui.row().classes("full-width items-end"):
+                    etf_count_input = ui.number(label="ETF数量", value=50, min=5, max=500).classes("q-mr-md")
+                    predict_input = ui.number(label="预测天数", value=config.ml.predict_days, min=1, max=20).classes("q-mr-md")
+                    ui.button("🤖 训练模型", on_click=lambda: _train_model(), color="primary").classes("q-mr-md")
+                train_status = ui.label("").classes("text-body2 q-mt-sm").style("color: #8b949e")
+
+            with ui.card().classes("full-width"):
+                ui.label("已保存模型").classes("text-h6 q-mb-md").style("color: #58a6ff")
+                model_table = ui.table(
+                    columns=[
+                        {"name": "name", "label": "模型名", "field": "name", "align": "left"},
+                        {"name": "path", "label": "路径", "field": "path", "align": "left"},
+                        {"name": "size_mb", "label": "大小(MB)", "field": "size_mb"},
+                    ],
+                    rows=[],
+                ).classes("full-width")
+                ui.button("🔄 刷新", on_click=lambda: _refresh_models()).props("flat").style("color: #58a6ff")
 
             def _screen():
                 all_factors = svc.list_factors()
@@ -586,7 +602,7 @@ def create_factor_page(config: ETFQuantConfig) -> None:
                         f"ICIR筛选{report['icir_filtered']}/{report['ic_filtered']} → "
                         f"去相关{len(selected)}/{report['icir_filtered']} → "
                         f"最终{len(selected)}个因子入选 "
-                        f"（平均IC={report['selected_avg_ic']:.4f}, 平均ICIR={report['selected_avg_icir']:.2f}，结果已保存供模型训练使用）"
+                        f"（平均IC={report['selected_avg_ic']:.4f}, 平均ICIR={report['selected_avg_icir']:.2f}，可直接点击下方训练模型）"
                     )
                     screen_result.style("color: #3fb950")
 
@@ -611,28 +627,6 @@ def create_factor_page(config: ETFQuantConfig) -> None:
                 screen_instance = FactorScreener(screen_config, data_bridge=bridge)
 
                 asyncio.get_event_loop().create_task(_run())
-
-        with ui.tab_panel("train"):
-            with ui.card().classes("full-width q-mb-md"):
-                ui.label("ML 模型训练").classes("text-h6 q-mb-md").style("color: #58a6ff")
-                ui.label("基于已筛选的因子，训练 XGBoost 预测模型，训练完成后可在回测页使用。若已执行因子筛选，将自动使用筛选结果作为特征；否则使用内置硬编码特征").classes("text-body2 q-mb-md").style("color: #8b949e")
-                with ui.row().classes("full-width items-end"):
-                    etf_count_input = ui.number(label="ETF数量", value=50, min=5, max=500).classes("q-mr-md")
-                    predict_input = ui.number(label="预测天数", value=config.ml.predict_days, min=1, max=20).classes("q-mr-md")
-                    ui.button("🤖 训练模型", on_click=lambda: _train_model(), color="primary").classes("q-mr-md")
-                train_status = ui.label("").classes("text-body2 q-mt-sm").style("color: #8b949e")
-
-            with ui.card().classes("full-width"):
-                ui.label("已保存模型").classes("text-h6 q-mb-md").style("color: #58a6ff")
-                model_table = ui.table(
-                    columns=[
-                        {"name": "name", "label": "模型名", "field": "name", "align": "left"},
-                        {"name": "path", "label": "路径", "field": "path", "align": "left"},
-                        {"name": "size_mb", "label": "大小(MB)", "field": "size_mb"},
-                    ],
-                    rows=[],
-                ).classes("full-width")
-                ui.button("🔄 刷新", on_click=lambda: _refresh_models()).props("flat").style("color: #58a6ff")
 
             async def _train_model():
                 train_status.text = "⏳ 正在准备训练数据..."
