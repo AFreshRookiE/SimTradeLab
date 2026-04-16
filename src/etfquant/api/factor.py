@@ -187,7 +187,7 @@ class FactorService:
 
     def mine_factors(self, n_steps: int = 2048, batch_size: int = 64,
                      timeout_minutes: float = 30.0, max_factors: int = 50,
-                     strategy: str = "RL搜索",
+                     strategy: str = "UCB1搜索",
                      ic_threshold: float | None = None,
                      rank_ic_threshold: float | None = None,
                      icir_threshold: float | None = None,
@@ -241,6 +241,7 @@ class FactorService:
         return {
             "total_evaluated": mining_result.total_evaluated,
             "total_valid": mining_result.total_valid,
+            "total_skipped": mining_result.total_skipped,
             "elapsed_seconds": mining_result.elapsed_seconds,
             "best_ic": mining_result.best_ic,
             "best_expression": mining_result.best_expression,
