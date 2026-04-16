@@ -171,7 +171,7 @@ _CATEGORY_LABELS = {
     "mean_reversion": "均值回归",
     "microstructure": "微观结构",
     "etf_specific": "ETF专属",
-    "custom": "自定义",
+    "custom": "🔍挖掘",
     "mined": "🔍挖掘",
     "preset": "📐预置",
 }
@@ -515,15 +515,25 @@ def create_factor_page(config: ETFQuantConfig) -> None:
                     screen_result.style("color: #f85149")
                     return
                 from etfquant.core.config import FactorScreenConfig
+                from etfquant.data.bridge import DataBridge
                 screen_config = FactorScreenConfig(
                     ic_threshold=s_ic.value,
                     icir_threshold=s_icir.value,
                     mutual_ic_threshold=s_mutual.value,
                     max_factors=int(s_max.value),
                 )
-                screen_instance = FactorScreener(screen_config)
+                bridge = DataBridge(config.data)
+                screen_instance = FactorScreener(screen_config, data_bridge=bridge)
                 selected = screen_instance.screen(all_factors)
-                selected_names = {s["name"] for s in selected}
+                selected_names = [s["name"] for s in selected]
+                svc.save_screen_result(
+                    ic_threshold=s_ic.value,
+                    icir_threshold=s_icir.value,
+                    mutual_ic_threshold=s_mutual.value,
+                    max_factors=int(s_max.value),
+                    selected_names=selected_names,
+                )
+                selected_name_set = set(selected_names)
                 rows = []
                 for f in all_factors:
                     rows.append({
@@ -531,16 +541,16 @@ def create_factor_page(config: ETFQuantConfig) -> None:
                         "ic": f"{f.get('ic', 0):.4f}",
                         "rank_ic": f"{f.get('rank_ic', 0):.4f}",
                         "icir": f"{f.get('icir', 0):.4f}",
-                        "selected": "✅" if f["name"] in selected_names else "❌",
+                        "selected": "✅" if f["name"] in selected_name_set else "❌",
                     })
                 screen_table.rows = rows
-                screen_result.text = f"✅ 筛选完成: {len(selected)} 个因子入选 / {len(all_factors)} 个总因子"
+                screen_result.text = f"✅ 筛选完成: {len(selected)} 个因子入选 / {len(all_factors)} 个总因子（结果已保存，可用于模型训练）"
                 screen_result.style("color: #3fb950")
 
         with ui.tab_panel("train"):
             with ui.card().classes("full-width q-mb-md"):
                 ui.label("ML 模型训练").classes("text-h6 q-mb-md").style("color: #58a6ff")
-                ui.label("基于已筛选的因子，训练 XGBoost 预测模型，训练完成后可在回测页使用").classes("text-body2 q-mb-md").style("color: #8b949e")
+                ui.label("基于已筛选的因子，训练 XGBoost 预测模型，训练完成后可在回测页使用。若已执行因子筛选，将自动使用筛选结果作为特征；否则使用内置硬编码特征").classes("text-body2 q-mb-md").style("color: #8b949e")
                 with ui.row().classes("full-width items-end"):
                     etf_count_input = ui.number(label="ETF数量", value=50, min=5, max=500).classes("q-mr-md")
                     predict_input = ui.number(label="预测天数", value=config.ml.predict_days, min=1, max=20).classes("q-mr-md")
@@ -565,7 +575,8 @@ def create_factor_page(config: ETFQuantConfig) -> None:
                 try:
                     result = svc.train_model()
                     if result.get("success"):
-                        train_status.text = f"✅ 训练完成! 样本{result['train_samples']}+{result['val_samples']}, 特征{result['feature_count']}个"
+                        feat_src = result.get("feature_source", "")
+                        train_status.text = f"✅ 训练完成! 样本{result['train_samples']}+{result['val_samples']}, 特征{result['feature_count']}个({feat_src})"
                         train_status.style("color: #3fb950")
                         _refresh_models()
                     else:

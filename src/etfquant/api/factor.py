@@ -105,6 +105,17 @@ class FactorService:
     def clear_invalid(self) -> int:
         return self._store.delete_invalid()
 
+    def save_screen_result(self, ic_threshold: float, icir_threshold: float,
+                           mutual_ic_threshold: float, max_factors: int,
+                           selected_names: list[str]) -> int:
+        return self._store.save_screen_result(ic_threshold, icir_threshold, mutual_ic_threshold, max_factors, selected_names)
+
+    def get_latest_screen_result(self) -> dict[str, Any] | None:
+        return self._store.get_latest_screen_result()
+
+    def get_selected_factor_expressions(self) -> list[dict[str, Any]]:
+        return self._store.get_selected_factor_expressions()
+
     def revalidate_all(self, ic_threshold: float | None = None,
                        rank_ic_threshold: float | None = None,
                        icir_threshold: float | None = None) -> dict[str, Any]:
@@ -328,10 +339,17 @@ class FactorService:
 
         bridge = DataBridge(self._data_config)
         ds = ETFDataSource(bridge, self._ml_config)
-        fe = FeatureEngineer(ds, self._ml_config)
+
+        factor_exprs = self._store.get_selected_factor_expressions()
+        if factor_exprs:
+            logger.info("使用筛选因子训练: %d 个因子表达式", len(factor_exprs))
+        else:
+            logger.info("未找到筛选结果，使用硬编码特征训练")
+
+        fe = FeatureEngineer(ds, self._ml_config, factor_expressions=factor_exprs if factor_exprs else None)
 
         codes = etf_codes or ds.get_stock_list()[:100]
-        logger.info("开始训练模型: %d 只ETF", len(codes))
+        logger.info("开始训练模型: %d 只ETF, 特征来源=%s", len(codes), "筛选因子" if factor_exprs else "硬编码")
 
         X, y, dates = fe.build_dataset(codes)
         if X.empty:
@@ -345,6 +363,7 @@ class FactorService:
         model_pkg.save(str(save_path))
         if model_pkg.metadata:
             model_pkg.metadata["save_path"] = str(save_path)
+            model_pkg.metadata["feature_source"] = "screened_factors" if factor_exprs else "hardcoded"
 
         return {
             "success": True,
@@ -352,6 +371,7 @@ class FactorService:
             "train_samples": model_pkg.metadata.get("train_samples", 0) if model_pkg.metadata else 0,
             "val_samples": model_pkg.metadata.get("val_samples", 0) if model_pkg.metadata else 0,
             "feature_count": model_pkg.metadata.get("feature_count", 0) if model_pkg.metadata else 0,
+            "feature_source": "筛选因子" if factor_exprs else "硬编码特征",
             "train_period": model_pkg.metadata.get("train_period", "") if model_pkg.metadata else "",
             "val_period": model_pkg.metadata.get("val_period", "") if model_pkg.metadata else "",
         }

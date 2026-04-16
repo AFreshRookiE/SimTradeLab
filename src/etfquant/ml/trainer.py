@@ -45,14 +45,48 @@ class ETFDataSource:
 
 
 class FeatureEngineer:
-    def __init__(self, data_source: ETFDataSource, config: MLConfig) -> None:
+    def __init__(self, data_source: ETFDataSource, config: MLConfig,
+                 factor_expressions: list[dict[str, Any]] | None = None) -> None:
         self._ds = data_source
         self._config = config
+        self._factor_expressions = factor_expressions
 
     def build_features(self, code: str) -> pd.DataFrame | None:
         price_df = self._ds.get_price_data(code)
         if price_df.empty or len(price_df) < self._config.lookback_days + 10:
             return None
+        if self._factor_expressions:
+            return self._build_features_from_expressions(code, price_df)
+        return self._build_features_hardcoded(code, price_df)
+
+    def _build_features_from_expressions(self, code: str, price_df: pd.DataFrame) -> pd.DataFrame | None:
+        from etfquant.alpha.calculator import ETFAlphaCalculator
+        from etfquant.core.config import AlphaConfig
+
+        features = pd.DataFrame(index=price_df.index)
+        close = price_df["close"].astype(float) if "close" in price_df.columns else price_df.iloc[:, 0].astype(float)
+
+        alpha_cfg = AlphaConfig(max_etf_for_ic=200)
+        calc = ETFAlphaCalculator(self._ds._bridge, alpha_cfg)
+
+        for f_info in self._factor_expressions:
+            expr = f_info.get("expression", "")
+            name = f_info.get("name", "")
+            if not expr:
+                continue
+            try:
+                vals = calc._evaluate_expression(expr, code)
+                if vals is not None and len(vals) == len(features.index):
+                    col_name = name if name else expr[:30]
+                    features[col_name] = vals.reindex(features.index)
+            except Exception as exc:
+                logger.warning("因子表达式求值失败: %s, code=%s, error=%s", expr, code, exc)
+
+        features["target"] = close.pct_change(self._config.predict_days).shift(-self._config.predict_days)
+        features = features.replace([np.inf, -np.inf], np.nan)
+        return features
+
+    def _build_features_hardcoded(self, code: str, price_df: pd.DataFrame) -> pd.DataFrame | None:
         features = pd.DataFrame(index=price_df.index)
         close = price_df["close"].astype(float) if "close" in price_df.columns else price_df.iloc[:, 0].astype(float)
         open_ = price_df.get("open", close).astype(float)

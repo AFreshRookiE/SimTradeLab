@@ -325,7 +325,7 @@ class FactorMiner:
                             "icir": icir,
                             "is_valid": True,
                             "category": "mined",
-                            "description": f"RL搜索发现 (step={step})",
+                            "description": f"RL搜索发现 (第{evaluated_count}个表达式, step={step})",
                         }
                         self._population.append((expr, abs(ic)))
                         result.total_valid += 1

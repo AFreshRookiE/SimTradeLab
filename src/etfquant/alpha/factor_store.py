@@ -43,6 +43,16 @@ class FactorStore:
             CREATE INDEX IF NOT EXISTS idx_factors_category ON factors(category);
             CREATE INDEX IF NOT EXISTS idx_factors_valid ON factors(is_valid);
             CREATE INDEX IF NOT EXISTS idx_factors_ic ON factors(ic);
+            CREATE TABLE IF NOT EXISTS screen_results (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT DEFAULT '',
+                ic_threshold REAL DEFAULT 0.0,
+                icir_threshold REAL DEFAULT 0.0,
+                mutual_ic_threshold REAL DEFAULT 0.0,
+                max_factors INTEGER DEFAULT 30,
+                selected_names TEXT DEFAULT '[]',
+                selected_count INTEGER DEFAULT 0
+            );
         """)
         self._conn.commit()
 
@@ -179,3 +189,45 @@ class FactorStore:
 
     def close(self) -> None:
         self._conn.close()
+
+    def save_screen_result(self, ic_threshold: float, icir_threshold: float,
+                           mutual_ic_threshold: float, max_factors: int,
+                           selected_names: list[str]) -> int:
+        with self._lock:
+            now = datetime.now().isoformat()
+            names_json = json.dumps(selected_names, ensure_ascii=False)
+            cursor = self._conn.execute(
+                """INSERT INTO screen_results (created_at, ic_threshold, icir_threshold, mutual_ic_threshold, max_factors, selected_names, selected_count)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (now, ic_threshold, icir_threshold, mutual_ic_threshold, max_factors, names_json, len(selected_names)),
+            )
+            self._conn.commit()
+            return cursor.lastrowid
+
+    def get_latest_screen_result(self) -> dict[str, Any] | None:
+        row = self._conn.execute(
+            "SELECT * FROM screen_results ORDER BY created_at DESC LIMIT 1"
+        ).fetchone()
+        if not row:
+            return None
+        return {
+            "id": row["id"],
+            "created_at": row["created_at"],
+            "ic_threshold": row["ic_threshold"],
+            "icir_threshold": row["icir_threshold"],
+            "mutual_ic_threshold": row["mutual_ic_threshold"],
+            "max_factors": row["max_factors"],
+            "selected_names": json.loads(row["selected_names"]) if row["selected_names"] else [],
+            "selected_count": row["selected_count"],
+        }
+
+    def get_selected_factor_expressions(self) -> list[dict[str, Any]]:
+        latest = self.get_latest_screen_result()
+        if not latest or not latest["selected_names"]:
+            return []
+        placeholders = ",".join("?" for _ in latest["selected_names"])
+        rows = self._conn.execute(
+            f"SELECT name, expression, ic, rank_ic, icir FROM factors WHERE name IN ({placeholders})",
+            latest["selected_names"],
+        ).fetchall()
+        return [{"name": r["name"], "expression": r["expression"], "ic": r["ic"], "rank_ic": r["rank_ic"], "icir": r["icir"]} for r in rows]
