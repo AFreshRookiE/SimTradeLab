@@ -37,6 +37,19 @@ DRAWDOWN_SERIES = {
     },
 }
 
+KLINE_COLORS = {
+    "up": "#ef5350",
+    "down": "#26a69a",
+    "ma5": "#e6a23c",
+    "ma10": "#409eff",
+    "ma20": "#f56c6c",
+    "ma60": "#909399",
+    "dif": "#58a6ff",
+    "dea": "#f0883e",
+    "macd_up": "#ef5350",
+    "macd_down": "#26a69a",
+}
+
 METRICS_ITEMS = [
     ("策略名称", "strategy_name", None),
     ("回测区间", None, "period"),

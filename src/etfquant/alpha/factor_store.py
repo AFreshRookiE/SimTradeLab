@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -14,10 +15,13 @@ logger = get_logger("etfquant.alpha.store")
 
 
 class FactorStore:
+    """SQLite因子持久化存储，线程安全。"""
+
     def __init__(self, db_path: str = "output/factors/factor_store.db") -> None:
         self._db_path = db_path
+        self._lock = threading.Lock()
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(db_path)
+        self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._init_db()
 
@@ -43,53 +47,92 @@ class FactorStore:
         self._conn.commit()
 
     def upsert(self, factor: Any) -> None:
-        now = datetime.now().isoformat()
-        params_json = json.dumps(factor.params if hasattr(factor, "params") else {}, ensure_ascii=False)
-        self._conn.execute(
-            """INSERT INTO factors (name, expression, description, ic, rank_ic, icir, is_valid, category, params, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-               ON CONFLICT(name) DO UPDATE SET
-                   expression=excluded.expression,
-                   description=excluded.description,
-                   ic=excluded.ic,
-                   rank_ic=excluded.rank_ic,
-                   icir=excluded.icir,
-                   is_valid=excluded.is_valid,
-                   category=excluded.category,
-                   params=excluded.params,
-                   updated_at=excluded.updated_at
-            """,
-            (
-                factor.name,
-                factor.expression,
-                factor.description if hasattr(factor, "description") else "",
-                factor.ic if hasattr(factor, "ic") else 0.0,
-                factor.rank_ic if hasattr(factor, "rank_ic") else 0.0,
-                factor.icir if hasattr(factor, "icir") else 0.0,
-                1 if (factor.is_valid if hasattr(factor, "is_valid") else False) else 0,
-                factor.category if hasattr(factor, "category") else "custom",
-                params_json,
-                now,
-                now,
-            ),
-        )
-        self._conn.commit()
+        with self._lock:
+            now = datetime.now().isoformat()
+            params_json = json.dumps(factor.params if hasattr(factor, "params") else {}, ensure_ascii=False)
+            self._conn.execute(
+                """INSERT INTO factors (name, expression, description, ic, rank_ic, icir, is_valid, category, params, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(name) DO UPDATE SET
+                       expression=excluded.expression,
+                       description=excluded.description,
+                       ic=excluded.ic,
+                       rank_ic=excluded.rank_ic,
+                       icir=excluded.icir,
+                       is_valid=excluded.is_valid,
+                       category=excluded.category,
+                       params=excluded.params,
+                       updated_at=excluded.updated_at
+                """,
+                (
+                    factor.name,
+                    factor.expression,
+                    factor.description if hasattr(factor, "description") else "",
+                    factor.ic if hasattr(factor, "ic") else 0.0,
+                    factor.rank_ic if hasattr(factor, "rank_ic") else 0.0,
+                    factor.icir if hasattr(factor, "icir") else 0.0,
+                    1 if (factor.is_valid if hasattr(factor, "is_valid") else False) else 0,
+                    factor.category if hasattr(factor, "category") else "custom",
+                    params_json,
+                    now,
+                    now,
+                ),
+            )
+            self._conn.commit()
+
+    def upsert_batch(self, factors: list[Any]) -> int:
+        with self._lock:
+            now = datetime.now().isoformat()
+            count = 0
+            for factor in factors:
+                params_json = json.dumps(factor.params if hasattr(factor, "params") else {}, ensure_ascii=False)
+                self._conn.execute(
+                    """INSERT INTO factors (name, expression, description, ic, rank_ic, icir, is_valid, category, params, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                       ON CONFLICT(name) DO UPDATE SET
+                           expression=excluded.expression,
+                           description=excluded.description,
+                           ic=excluded.ic,
+                           rank_ic=excluded.rank_ic,
+                           icir=excluded.icir,
+                           is_valid=excluded.is_valid,
+                           category=excluded.category,
+                           params=excluded.params,
+                           updated_at=excluded.updated_at
+                    """,
+                    (
+                        factor.name,
+                        factor.expression,
+                        factor.description if hasattr(factor, "description") else "",
+                        factor.ic if hasattr(factor, "ic") else 0.0,
+                        factor.rank_ic if hasattr(factor, "rank_ic") else 0.0,
+                        factor.icir if hasattr(factor, "icir") else 0.0,
+                        1 if (factor.is_valid if hasattr(factor, "is_valid") else False) else 0,
+                        factor.category if hasattr(factor, "category") else "custom",
+                        params_json,
+                        now,
+                        now,
+                    ),
+                )
+                count += 1
+            self._conn.commit()
+            return count
 
     def list_all(self) -> list[dict[str, Any]]:
         rows = self._conn.execute(
-            "SELECT name, expression, description, ic, rank_ic, icir, is_valid, category, params, created_at, updated_at FROM factors ORDER BY ABS(ic) DESC"
+            "SELECT name, expression, description, ic, rank_ic, icir, is_valid, category, params, created_at, updated_at FROM factors ORDER BY ABS(ic) DESC, ABS(icir) DESC"
         ).fetchall()
         return [self._row_to_dict(r) for r in rows]
 
     def list_valid(self) -> list[dict[str, Any]]:
         rows = self._conn.execute(
-            "SELECT name, expression, description, ic, rank_ic, icir, is_valid, category, params, created_at, updated_at FROM factors WHERE is_valid=1 ORDER BY ABS(ic) DESC"
+            "SELECT name, expression, description, ic, rank_ic, icir, is_valid, category, params, created_at, updated_at FROM factors WHERE is_valid=1 ORDER BY ABS(ic) DESC, ABS(icir) DESC"
         ).fetchall()
         return [self._row_to_dict(r) for r in rows]
 
     def list_by_category(self, category: str) -> list[dict[str, Any]]:
         rows = self._conn.execute(
-            "SELECT name, expression, description, ic, rank_ic, icir, is_valid, category, params, created_at, updated_at FROM factors WHERE category=? ORDER BY ABS(ic) DESC",
+            "SELECT name, expression, description, ic, rank_ic, icir, is_valid, category, params, created_at, updated_at FROM factors WHERE category=? ORDER BY ABS(ic) DESC, ABS(icir) DESC",
             (category,),
         ).fetchall()
         return [self._row_to_dict(r) for r in rows]

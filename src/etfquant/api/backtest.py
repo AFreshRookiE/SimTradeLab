@@ -12,6 +12,13 @@ __all__ = ["BacktestService"]
 
 logger = get_logger("etfquant.api.backtest")
 
+_STRATEGY_DESC: dict[str, str] = {
+    "ma_cross": "双均线交叉策略：短期均线上穿长期均线买入，下穿卖出",
+    "momentum": "动量策略：N日收益率为正买入，为负卖出",
+    "mean_reversion": "均值回归策略：Z-score低于阈值买入，回归卖出",
+    "etf_premium": "ETF折溢价策略：溢价率低于阈值买入，高于阈值卖出",
+}
+
 _STRATEGY_TEMPLATES: dict[str, str] = {
     "ma_cross": '''def initialize(context):
     context.fast_period = 5
@@ -95,10 +102,10 @@ class BacktestService:
         import pandas as pd
 
         config = self._config.model_copy(update={
-            "initial_capital": initial_capital or self._config.initial_capital,
+            "initial_capital": initial_capital if initial_capital is not None else self._config.initial_capital,
             "t_plus_1": t_plus_1 if t_plus_1 is not None else self._config.t_plus_1,
-            "commission_rate": commission_rate or self._config.commission_rate,
-            "slippage_rate": slippage_rate or self._config.slippage_rate,
+            "commission_rate": commission_rate if commission_rate is not None else self._config.commission_rate,
+            "slippage_rate": slippage_rate if slippage_rate is not None else self._config.slippage_rate,
         })
 
         bridge = DataBridge(self._data_config)
@@ -208,11 +215,3 @@ class BacktestService:
             "total_trades": result.total_trades,
             "nav_count": len(result.nav_series),
         }
-
-
-_STRATEGY_DESC: dict[str, str] = {
-    "ma_cross": "双均线交叉策略：短期均线上穿长期均线买入，下穿卖出",
-    "momentum": "动量策略：N日收益率为正买入，为负卖出",
-    "mean_reversion": "均值回归策略：Z-score低于阈值买入，回归卖出",
-    "etf_premium": "ETF折溢价策略：溢价率低于阈值买入，高于阈值卖出",
-}

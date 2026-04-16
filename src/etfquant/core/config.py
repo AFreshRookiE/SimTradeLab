@@ -4,7 +4,6 @@ import os
 from pathlib import Path
 from typing import Any
 
-import yaml
 from pydantic import BaseModel
 
 __all__ = ["ETFQuantConfig", "DataConfig", "AlphaConfig", "MLConfig", "BacktestConfig", "UIConfig", "load_config"]
@@ -69,6 +68,9 @@ class AlphaConfig(BaseModel):
     db_path: str = "output/factors/factor_store.db"
     schedule: ScheduleConfig = ScheduleConfig()
     resources: ResourceConfig = ResourceConfig()
+    cache_size: int = 128
+    max_etf_for_ic: int = 1035
+    max_etf_for_mutual_ic: int = 500
 
 
 class FactorScreenConfig(BaseModel):
@@ -129,6 +131,7 @@ class ETFQuantConfig(BaseModel):
 def load_config(config_path: str = "config/etfquant.yaml") -> ETFQuantConfig:
     if not os.path.exists(config_path):
         return ETFQuantConfig()
+    import yaml
     with open(config_path, "r", encoding="utf-8") as f:
         raw: dict[str, Any] = yaml.safe_load(f) or {}
     return ETFQuantConfig.model_validate(raw)

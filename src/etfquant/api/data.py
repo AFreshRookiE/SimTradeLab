@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import time
 from typing import Any
+
+import pandas as pd
 
 from etfquant.core.config import DataConfig
 from etfquant.core.logger import get_logger
@@ -15,21 +18,99 @@ class DataService:
     def __init__(self, config: DataConfig) -> None:
         self._config = config
         self._bridge = DataBridge(config)
+        self._golden_cross_cache: list[dict[str, Any]] = []
+        self._golden_cross_cache_time: float = 0
 
     def list_etfs(self, category: str | None = None, search: str | None = None) -> list[dict[str, Any]]:
         codes = self._bridge.list_etf_codes(category)
-        if search:
-            codes = [c for c in codes if search.lower() in c.lower()]
         result = []
         for code in codes:
+            info = self._bridge.classification.etf_map.get(code)
+            name = info.name if info else ""
+            if search:
+                q = search.lower()
+                if q not in code.lower() and q not in name.lower():
+                    continue
+            result.append({
+                "code": code,
+                "name": name,
+                "category": info.category if info else "",
+                "tracking_index": info.tracking_index if info else "",
+            })
+        return result
+
+    def get_golden_cross_etfs(self, top_n: int = 50, short_window: int = 5, long_window: int = 10, lookback: int = 5) -> list[dict[str, Any]]:
+        if self._golden_cross_cache and (time.time() - self._golden_cross_cache_time) < 300:
+            return self._golden_cross_cache[:top_n]
+
+        signals: list[tuple[str, str, float, int]] = []
+        codes = self._bridge.list_etf_codes()
+        min_rows = long_window + lookback + 1
+        for code in codes:
+            df = self._bridge.load_etf_daily(code)
+            if df.empty or len(df) < min_rows:
+                continue
+            close = df["close"].astype(float)
+            tail = close.iloc[-(min_rows + 5):]
+            ma_short = tail.rolling(short_window).mean()
+            ma_long = tail.rolling(long_window).mean()
+            diff = ma_short - ma_long
+            if diff.isna().all():
+                continue
+            recent_diff = diff.iloc[-lookback:]
+            prev_diff = diff.iloc[-lookback - 1]
+            crossed = False
+            cross_day = -1
+            for i in range(len(recent_diff)):
+                curr = recent_diff.iloc[i]
+                prev = prev_diff if i == 0 else recent_diff.iloc[i - 1]
+                if pd.isna(curr) or pd.isna(prev):
+                    continue
+                if prev <= 0 and curr > 0:
+                    crossed = True
+                    cross_day = i
+                    break
+            if not crossed:
+                if recent_diff.iloc[-1] > 0 and prev_diff <= 0:
+                    crossed = True
+                    cross_day = 0
+            if not crossed:
+                continue
+            latest_diff = diff.iloc[-1]
+            if pd.isna(latest_diff) or latest_diff <= 0:
+                continue
+            strength = float(latest_diff / tail.iloc[-1] * 100)
+            signal_label = f"MA{short_window}↑MA{long_window}"
+            signals.append((code, signal_label, strength, cross_day))
+        signals.sort(key=lambda x: (-x[3], -x[2]))
+        result = []
+        for code, signal_label, strength, cross_day in signals[:top_n]:
             info = self._bridge.classification.etf_map.get(code)
             result.append({
                 "code": code,
                 "name": info.name if info else "",
                 "category": info.category if info else "",
                 "tracking_index": info.tracking_index if info else "",
+                "signal": signal_label,
+                "strength": float(round(strength, 2)),
             })
+        self._golden_cross_cache = result
+        self._golden_cross_cache_time = time.time()
         return result
+
+    def search_etfs(self, query: str, limit: int = 20) -> list[dict[str, str]]:
+        if not query or len(query) < 1:
+            return []
+        q = query.lower()
+        matches = []
+        for code in self._bridge.list_etf_codes():
+            info = self._bridge.classification.etf_map.get(code)
+            name = info.name if info else ""
+            if q in code.lower() or q in name.lower():
+                matches.append({"code": code, "name": name, "label": f"{code} {name}"})
+                if len(matches) >= limit:
+                    break
+        return matches
 
     def get_etf_detail(self, code: str) -> dict[str, Any]:
         df = self._bridge.load_etf_daily(code)
@@ -58,33 +139,19 @@ class DataService:
         detail["has_nav"] = not nav_df.empty
         premium_df = self._bridge.load_etf_premium(code)
         detail["has_premium"] = not premium_df.empty
+        adjust_df = self._bridge.load_etf_adjust_factor(code)
+        detail["has_adjust"] = not adjust_df.empty
         return detail
 
-    def get_coverage(self) -> dict[str, Any]:
-        codes = self._bridge.list_etf_codes()
-        categories: dict[str, int] = {}
-        for code in codes:
-            info = self._bridge.classification.etf_map.get(code)
-            cat = info.category if info else "未分类"
-            categories[cat] = categories.get(cat, 0) + 1
-        sample_details = []
-        for code in codes[:10]:
-            df = self._bridge.load_etf_daily(code)
-            if not df.empty:
-                sample_details.append({
-                    "code": code,
-                    "start": str(df.index.min().date()),
-                    "end": str(df.index.max().date()),
-                    "rows": len(df),
-                })
-        return {
-            "total_etf_count": len(codes),
-            "categories": categories,
-            "sample_details": sample_details,
-        }
-
-    def get_etf_chart_data(self, code: str) -> list[dict[str, Any]]:
+    def get_etf_chart_data(self, code: str, start_date: str | None = None, end_date: str | None = None) -> list[dict[str, Any]]:
         df = self._bridge.load_etf_daily(code)
+        if df.empty:
+            return []
+        df = df.copy()
+        if start_date:
+            df = df[df.index >= pd.Timestamp(start_date)]
+        if end_date:
+            df = df[df.index <= pd.Timestamp(end_date)]
         if df.empty:
             return []
         result = []
@@ -98,7 +165,10 @@ class DataService:
         return result
 
     def refresh_data(self) -> dict[str, Any]:
-        self._bridge.clear_cache()
+        from etfquant.data.bridge import DataBridge
+        DataBridge.clear_cache()
+        self._golden_cross_cache = []
+        self._golden_cross_cache_time = 0
         codes = self._bridge.list_etf_codes()
         nav_count = 0
         premium_count = 0

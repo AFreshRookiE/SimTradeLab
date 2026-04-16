@@ -75,14 +75,14 @@ _shared_state: dict[str, Any] = {}
 
 
 def _create_nav(config: ETFQuantConfig) -> None:
-    with ui.header().classes("items-center justify-between q-px-lg q-py-xs").style("height: 48px"):
+    with ui.header().classes("sticky top-0 z-50 items-center justify-between q-px-lg q-py-xs").style("height: 56px; background-color: #161b22 !important; border-bottom: 1px solid #30363d !important"):
         with ui.row().classes("items-center"):
             ui.html('<span style="font-size:20px;font-weight:700;color:#58a6ff">ETFQuant</span><span style="font-size:20px;font-weight:300;color:#8b949e">Desk</span>')
             ui.label("|").classes("text-grey-7 q-mx-sm")
             ui.label("ETF专属量化分析平台").classes("text-caption text-grey-6")
-        with ui.row().classes("items-center q-gutter-xs"):
+        with ui.row().classes("items-center q-gutter-sm"):
             for path, icon, label in _NAV_ITEMS:
-                ui.button(f"{icon} {label}", on_click=lambda p=path: ui.navigate.to(p)).classes("nav-btn").props("flat dense no-caps")
+                ui.button(f"{icon} {label}", on_click=lambda p=path: ui.navigate.to(p)).classes("nav-btn").props("flat dense no-caps").style("min-width: 100px; justify-content: center;")
 
     with ui.footer().classes("text-center q-py-xs").style("height: 28px"):
         ui.label("ETFQuantDesk v0.2.0 | ETF Data → Alpha → ML → Backtest").classes("text-caption text-grey-7")
@@ -96,61 +96,7 @@ def main() -> None:
 
     @ui.page("/")
     def index():
-        _create_nav(config)
-        with ui.column().classes("q-pa-xl items-center justify-center").style("min-height: calc(100vh - 76px)"):
-            ui.html('<div style="text-align:center;margin-bottom:32px"><h1 style="font-size:36px;font-weight:700;color:#58a6ff;margin:0">🚀 ETFQuantDesk</h1><p style="font-size:16px;color:#8b949e;margin-top:8px">ETF专属量化分析桌面软件</p><p style="font-size:14px;color:#6e7681;margin-top:4px">全流程: 数据 → 因子生成 → 机器学习 → 回测验证</p></div>')
-
-            with ui.row().classes("q-gutter-lg q-mb-xl"):
-                for path, icon, label in _NAV_ITEMS:
-                    with ui.column().classes("home-card items-center").on("click", lambda p=path: ui.navigate.to(p)):
-                        ui.label(icon).style("font-size: 36px")
-                        ui.label(label).style("color: #c9d1d9; font-size: 14px; font-weight: 500; margin-top: 8px")
-
-            with ui.card().classes("q-mt-lg").style("max-width: 640px; width: 100%"):
-                ui.label("⚡ 一键全流程").classes("text-subtitle1 q-mb-md").style("color: #58a6ff; font-weight: 600")
-                ui.label("数据检查 → 因子生成 → 模型训练 → 回测验证，一键完成").classes("text-body2 q-mb-md").style("color: #8b949e")
-                with ui.row().classes("full-width items-center"):
-                    code_input = ui.input(value=config.backtest.benchmark, placeholder="ETF代码").classes("col q-mr-md").props("dense outlined")
-                    ui.button("🚀 一键运行", on_click=lambda: _run_pipeline(code_input.value.strip()), color="primary").props("dense")
-                pipeline_status = ui.label("").classes("text-body2 q-mt-sm")
-                pipeline_stages = ui.row().classes("q-mt-sm q-gutter-xs")
-
-            async def _run_pipeline(code: str):
-                if not code:
-                    code = config.backtest.benchmark
-                pipeline_status.text = f"⏳ 正在运行全流程: {code}..."
-                pipeline_status.style("color: #58a6ff")
-                pipeline_stages.clear()
-                with pipeline_stages:
-                    for s in ["数据检查", "因子生成", "模型训练", "回测验证"]:
-                        ui.label(s).classes("stage-badge stage-pending")
-                try:
-                    from etfquant.pipeline.bus import PipelineBus
-                    bus = PipelineBus(config)
-                    future = bus.run_full_pipeline([code])
-                    result = await asyncio.get_event_loop().run_in_executor(None, future.result)
-                    pipeline_stages.clear()
-                    with pipeline_stages:
-                        stage_labels = ["数据检查", "因子生成", "模型训练", "回测验证"]
-                        stage_keys = ["data_check", "alpha_generate", "ml_train", "backtest"]
-                        for lbl, key in zip(stage_labels, stage_keys):
-                            s = result.stages.get(key)
-                            if s and s.status.value == "completed":
-                                ui.label(lbl).classes("stage-badge stage-done")
-                            elif s and s.status.value == "failed":
-                                ui.label(lbl).classes("stage-badge stage-failed")
-                            else:
-                                ui.label(lbl).classes("stage-badge stage-pending")
-                    if result.success:
-                        pipeline_status.text = f"✅ 完成! 耗时{result.total_elapsed:.1f}s, 有效因子{result.alpha_count}个"
-                        pipeline_status.style("color: #3fb950")
-                        _shared_state["last_pipeline_result"] = result
-                    else:
-                        pipeline_status.text = "❌ 执行失败，请查看日志"
-                        pipeline_status.style("color: #f85149")
-                except Exception as e:
-                    pipeline_status.text = f"❌ 异常: {e}"
-                    pipeline_status.style("color: #f85149")
+        ui.navigate.to("/data")
 
     @ui.page("/data")
     def data_page():
