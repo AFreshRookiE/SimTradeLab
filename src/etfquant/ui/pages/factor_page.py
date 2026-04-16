@@ -221,7 +221,7 @@ def create_factor_page(config: ETFQuantConfig) -> None:
                 rows=[],
                 row_key="name",
                 pagination={"rowsPerPage": 5, "rowsPerPageOptions": [5, 10, 20, 50]},
-            ).classes("full-width").props("resizable-columns").on("rowClick", lambda e: _on_row_click(e), [[], ["name"], None])
+            ).classes("full-width").props('resizable-columns separator="cell"').on("rowClick", lambda e: _on_row_click(e), [[], ["name"], None])
 
             with ui.card().classes("full-width q-mt-md").style("border-radius: 12px !important; border: 1px solid #30363d !important;"):
                 detail_title = ui.label("📋 点击因子查看详情").classes("text-subtitle1 q-mb-sm").style("color: #58a6ff")
@@ -499,7 +499,7 @@ def create_factor_page(config: ETFQuantConfig) -> None:
         with ui.tab_panel("screen"):
             with ui.card().classes("full-width q-mb-md"):
                 ui.label("因子筛选配置").classes("text-h6 q-mb-md").style("color: #58a6ff")
-                ui.label("从因子池中筛选高IC、低相关的因子子集，供ML训练使用").classes("text-body2 q-mb-md").style("color: #8b949e")
+                ui.label("三级漏斗筛选：IC筛选 → ICIR筛选 → 去相关筛选。筛选结果自动保存，模型训练时会自动使用筛选后的因子作为特征，而非全部因子池。").classes("text-body2 q-mb-md").style("color: #8b949e")
                 with ui.row():
                     s_ic = ui.number(label="IC阈值", value=config.ml.factor_screen.ic_threshold, format="%.4f", step=0.01, min=0.0, max=1.0).classes("q-mr-md").style("min-width: 160px")
                     s_icir = ui.number(label="ICIR阈值", value=config.ml.factor_screen.icir_threshold, format="%.2f", step=0.1, min=0.0, max=10.0).classes("q-mr-md").style("min-width: 160px")
@@ -507,19 +507,44 @@ def create_factor_page(config: ETFQuantConfig) -> None:
                     s_max = ui.number(label="最大因子数", value=config.ml.factor_screen.max_factors, step=1, min=1, max=100).classes("q-mr-md").style("min-width: 160px")
                 ui.button("🔍 执行筛选", on_click=lambda: _screen(), color="primary").classes("q-mt-md")
 
+            with ui.expansion("📖 因子筛选参数说明", icon="help").classes("full-width q-mb-md").style("border: 1px solid #30363d; border-radius: 8px;"):
+                ui.markdown("""
+**因子筛选三级漏斗说明：**
+
+| 层级 | 参数 | 建议范围 | 说明 |
+|------|------|----------|------|
+| 第一级 | IC阈值 | 0.02~0.05 | 因子IC绝对值需超过此值。0.03=常规标准，0.05=严格标准。IC衡量因子预测收益方向的能力 |
+| 第二级 | ICIR阈值 | 0.3~1.0 | 因子ICIR绝对值需超过此值。0.5=稳定，1.0=非常稳定。ICIR=IC均值/IC标准差，衡量因子预测的稳定性 |
+| 第三级 | 互斥IC阈值 | 0.5~0.8 | 两因子截面相关系数超过此值则视为相似，只保留IC更高的。0.7=常规标准，0.5=严格去冗余 |
+| 最终 | 最大因子数 | 10~30 | 最终保留的因子数量上限。太多会过拟合，太少信息不足 |
+
+**筛选结果用途：**
+1. **模型训练**：筛选后的因子会自动作为XGBoost模型的特征输入，替代硬编码特征
+2. **因子去冗余**：去除实质相同的因子（如`close/ts_mean(close,20)`和`1/ma_ratio-1`），避免多重共线性
+3. **降低过拟合**：从69个因子中精选10-30个高质量、低相关的因子，比用全部因子训练更稳健
+
+**互斥IC阈值详解：**
+- 计算两个因子在截面上的实际值相关系数（不是IC值比例）
+- |corr| > 0.7 → 两个因子在说同一件事，只保留IC更高的
+- |corr| < 0.5 → 两个因子提供不同维度的信息，都保留
+- 设得太低(如0.3)会过度去冗余，可能丢失互补信息
+- 设得太高(如0.9)会保留太多相似因子，导致模型不稳定
+""").style("color: #c9d1d9; font-size: 13px; line-height: 1.6;")
+
             screen_result = ui.label("").classes("text-body1 q-mb-md").style("color: #8b949e")
 
             screen_table = ui.table(
                 columns=[
-                    {"name": "name", "label": "因子名", "field": "name", "sortable": True, "align": "left"},
-                    {"name": "ic", "label": "IC", "field": "ic", "sortable": True},
-                    {"name": "rank_ic", "label": "RankIC", "field": "rank_ic"},
-                    {"name": "icir", "label": "ICIR", "field": "icir", "sortable": True},
-                    {"name": "selected", "label": "入选", "field": "selected", "align": "center"},
+                    {"name": "name", "label": "因子名", "field": "name", "sortable": True, "align": "left", "width": "120px"},
+                    {"name": "ic", "label": "IC", "field": "ic", "sortable": True, "align": "right", "width": "65px"},
+                    {"name": "rank_ic", "label": "RankIC", "field": "rank_ic", "sortable": True, "align": "right", "width": "65px"},
+                    {"name": "icir", "label": "ICIR", "field": "icir", "sortable": True, "align": "right", "width": "70px"},
+                    {"name": "selected", "label": "入选", "field": "selected", "align": "center", "width": "60px"},
                 ],
                 rows=[],
                 row_key="name",
-            ).classes("full-width")
+                pagination={"rowsPerPage": 20, "rowsPerPageOptions": [10, 20, 50, 100]},
+            ).classes("full-width").props('resizable-columns separator="cell"')
 
             def _screen():
                 all_factors = svc.list_factors()
@@ -557,7 +582,14 @@ def create_factor_page(config: ETFQuantConfig) -> None:
                         "selected": "✅" if f["name"] in selected_name_set else "❌",
                     })
                 screen_table.rows = rows
-                screen_result.text = f"✅ 筛选完成: {len(selected)} 个因子入选 / {len(all_factors)} 个总因子（结果已保存，可用于模型训练）"
+                report = screen_instance.get_screening_report(all_factors, selected)
+                screen_result.text = (
+                    f"✅ 筛选完成: IC筛选{report['ic_filtered']}/{len(all_factors)} → "
+                    f"ICIR筛选{report['icir_filtered']}/{report['ic_filtered']} → "
+                    f"去相关{len(selected)}/{report['icir_filtered']} → "
+                    f"最终{len(selected)}个因子入选 "
+                    f"（平均IC={report['selected_avg_ic']:.4f}, 平均ICIR={report['selected_avg_icir']:.2f}，结果已保存供模型训练使用）"
+                )
                 screen_result.style("color: #3fb950")
 
         with ui.tab_panel("train"):

@@ -191,8 +191,8 @@ def create_data_page(config: ETFQuantConfig) -> None:
                     row["signal"] = ""
                     row["strength"] = ""
             else:
-                hot_label.text = "✨ 金叉信号 ETF"
-                etfs = svc.get_golden_cross_etfs(top_n=50)
+                hot_label.text = "✨ 金叉信号 ETF（按信号强度排序）"
+                etfs = svc.get_golden_cross_etfs(top_n=9999)
             etf_table.rows = etfs
 
         def _update_data():

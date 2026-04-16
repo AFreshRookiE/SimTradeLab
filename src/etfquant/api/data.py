@@ -43,7 +43,7 @@ class DataService:
         if self._golden_cross_cache and (time.time() - self._golden_cross_cache_time) < 300:
             return self._golden_cross_cache[:top_n]
 
-        signals: list[tuple[str, str, float, int]] = []
+        signals: dict[str, tuple[str, float, int]] = {}
         codes = self._bridge.list_etf_codes()
         min_rows = long_window + lookback + 1
         for code in codes:
@@ -74,29 +74,37 @@ class DataService:
                 if recent_diff.iloc[-1] > 0 and prev_diff <= 0:
                     crossed = True
                     cross_day = 0
-            if not crossed:
-                continue
             latest_diff = diff.iloc[-1]
-            if pd.isna(latest_diff) or latest_diff <= 0:
-                continue
-            strength = float(latest_diff / tail.iloc[-1] * 100)
-            signal_label = f"MA{short_window}↑MA{long_window}"
-            signals.append((code, signal_label, strength, cross_day))
-        signals.sort(key=lambda x: (-x[3], -x[2]))
+            if crossed and not pd.isna(latest_diff) and latest_diff > 0:
+                strength = float(latest_diff / tail.iloc[-1] * 100)
+                signal_label = f"MA{short_window}↑MA{long_window}"
+                signals[code] = (signal_label, strength, cross_day)
+        sorted_codes = sorted(codes, key=lambda c: (-signals[c][2] if c in signals else 999, -signals[c][1] if c in signals else -999))
         result = []
-        for code, signal_label, strength, cross_day in signals[:top_n]:
+        for code in sorted_codes:
             info = self._bridge.classification.etf_map.get(code)
-            result.append({
-                "code": code,
-                "name": info.name if info else "",
-                "category": info.category if info else "",
-                "tracking_index": info.tracking_index if info else "",
-                "signal": signal_label,
-                "strength": float(round(strength, 2)),
-            })
+            if code in signals:
+                sig_label, strength, _ = signals[code]
+                result.append({
+                    "code": code,
+                    "name": info.name if info else "",
+                    "category": info.category if info else "",
+                    "tracking_index": info.tracking_index if info else "",
+                    "signal": sig_label,
+                    "strength": float(round(strength, 2)),
+                })
+            else:
+                result.append({
+                    "code": code,
+                    "name": info.name if info else "",
+                    "category": info.category if info else "",
+                    "tracking_index": info.tracking_index if info else "",
+                    "signal": "",
+                    "strength": 0.0,
+                })
         self._golden_cross_cache = result
         self._golden_cross_cache_time = time.time()
-        return result
+        return result[:top_n]
 
     def search_etfs(self, query: str, limit: int = 20) -> list[dict[str, str]]:
         if not query or len(query) < 1:
