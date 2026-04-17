@@ -211,12 +211,14 @@ class ModelTrainer:
             import xgboost as xgb
 
             model_cls = xgb.XGBRegressor
+            is_xgb = True
         except ImportError:
             try:
-                from sklearn.ensemble import GradientBoostingRegressor
+                from sklearn.ensemble import HistGradientBoostingRegressor
 
-                model_cls = GradientBoostingRegressor
-                logger.warning("xgboost 不可用，使用 GradientBoostingRegressor 替代")
+                model_cls = HistGradientBoostingRegressor
+                is_xgb = False
+                logger.warning("xgboost 不可用，使用 HistGradientBoostingRegressor 替代（原生支持NaN）")
             except ImportError:
                 raise ImportError("训练模型需要 xgboost 或 scikit-learn，请安装其一: pip install xgboost 或 pip install scikit-learn")
 
@@ -243,13 +245,14 @@ class ModelTrainer:
             X_val_scaled = X_val.fillna(0).values
 
         params = self._config.model_params.copy()
-        if model_cls.__module__.startswith("xgboost"):
+        if is_xgb:
             model = model_cls(**params)
         else:
-            sklearn_params = {k: v for k, v in params.items() if k in ("max_depth", "learning_rate", "subsample", "n_estimators")}
+            sklearn_params = {k: v for k, v in params.items() if k in ("max_depth", "learning_rate", "max_iter", "l2_regularization")}
+            if "n_estimators" in params and "max_iter" not in sklearn_params:
+                sklearn_params["max_iter"] = params["n_estimators"]
             model = model_cls(**sklearn_params)
 
-        is_xgb = model_cls.__module__.startswith("xgboost")
         if is_xgb:
             model.fit(X_train_scaled, y_train, eval_set=[(X_val_scaled, y_val)], verbose=False)
         else:
