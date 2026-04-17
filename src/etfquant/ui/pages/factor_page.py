@@ -559,7 +559,6 @@ def create_factor_page(config: ETFQuantConfig) -> None:
                     {"name": "ic", "label": "IC", "field": "ic", "sortable": True, "align": "right", "width": "65px"},
                     {"name": "rank_ic", "label": "RankIC", "field": "rank_ic", "sortable": True, "align": "right", "width": "65px"},
                     {"name": "icir", "label": "ICIR", "field": "icir", "sortable": True, "align": "right", "width": "70px"},
-                    {"name": "selected", "label": "入选", "field": "selected", "align": "center", "width": "60px"},
                 ],
                 rows=[],
                 row_key="name",
@@ -649,13 +648,13 @@ def create_factor_page(config: ETFQuantConfig) -> None:
                     selected_name_set = set(selected_names)
                     rows = []
                     for f in all_factors:
-                        rows.append({
-                            "name": f["name"],
-                            "ic": f"{f.get('ic', 0):.4f}",
-                            "rank_ic": f"{f.get('rank_ic', 0):.4f}",
-                            "icir": f"{f.get('icir', 0):.4f}",
-                            "selected": "✅" if f["name"] in selected_name_set else "❌",
-                        })
+                        if f["name"] in selected_name_set:
+                            rows.append({
+                                "name": f["name"],
+                                "ic": f"{f.get('ic', 0):.4f}",
+                                "rank_ic": f"{f.get('rank_ic', 0):.4f}",
+                                "icir": f"{f.get('icir', 0):.4f}",
+                            })
                     screen_table.rows = rows
                     report = screen_instance.get_screening_report(all_factors, selected)
                     screen_result.text = (

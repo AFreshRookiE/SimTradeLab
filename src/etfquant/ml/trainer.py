@@ -202,17 +202,23 @@ class ModelTrainer:
         self._config = config
 
     def train(self, X: pd.DataFrame, y: pd.Series, dates: pd.Series) -> ModelPackage:
-        from sklearn.preprocessing import StandardScaler
+        try:
+            from sklearn.preprocessing import StandardScaler
+        except ImportError:
+            StandardScaler = None
 
         try:
             import xgboost as xgb
 
             model_cls = xgb.XGBRegressor
         except ImportError:
-            from sklearn.ensemble import GradientBoostingRegressor
+            try:
+                from sklearn.ensemble import GradientBoostingRegressor
 
-            model_cls = GradientBoostingRegressor
-            logger.warning("xgboost 不可用，使用 GradientBoostingRegressor 替代")
+                model_cls = GradientBoostingRegressor
+                logger.warning("xgboost 不可用，使用 GradientBoostingRegressor 替代")
+            except ImportError:
+                raise ImportError("训练模型需要 xgboost 或 scikit-learn，请安装其一: pip install xgboost 或 pip install scikit-learn")
 
         sorted_idx = dates.argsort()
         X_sorted = X.iloc[sorted_idx]
@@ -227,9 +233,14 @@ class ModelTrainer:
         X_val = X_sorted.iloc[train_end:val_end]
         y_val = y_sorted.iloc[train_end:val_end]
 
-        scaler = StandardScaler()
-        X_train_scaled = scaler.fit_transform(X_train)
-        X_val_scaled = scaler.transform(X_val)
+        if StandardScaler is not None:
+            scaler = StandardScaler()
+            X_train_scaled = scaler.fit_transform(X_train)
+            X_val_scaled = scaler.transform(X_val)
+        else:
+            scaler = None
+            X_train_scaled = X_train.fillna(0).values
+            X_val_scaled = X_val.fillna(0).values
 
         params = self._config.model_params.copy()
         if model_cls.__module__.startswith("xgboost"):
