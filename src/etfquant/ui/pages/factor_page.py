@@ -689,10 +689,14 @@ def create_factor_page(config: ETFQuantConfig) -> None:
             async def _train_model():
                 latest = svc.get_latest_screen_result()
                 if not latest or not latest.get("selected_names"):
-                    train_status.text = "⚠️ 请先执行因子筛选（第一步），再训练模型。若未筛选，模型将使用硬编码特征而非因子池中的因子。"
+                    train_status.text = "⚠️ 请先执行因子筛选（第一步），再训练模型。"
                     train_status.style("color: #d29922")
                     return
-                train_status.text = "⏳ 正在准备训练数据..."
+                n_selected = len(latest["selected_names"])
+                screen_time = latest.get("created_at", "")
+                if "T" in screen_time:
+                    screen_time = screen_time.replace("T", " ")[:19]
+                train_status.text = f"⏳ 使用筛选结果({n_selected}个因子, 筛选时间{screen_time})训练中..."
                 train_status.style("color: #58a6ff")
                 try:
                     result = await asyncio.get_event_loop().run_in_executor(

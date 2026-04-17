@@ -361,7 +361,11 @@ class FactorService:
         trainer = ModelTrainer(self._ml_config)
         model_pkg = trainer.train(X, y, dates)
 
-        save_path = Path(self._ml_config.save_path) / "etf_model.ptp"
+        from datetime import datetime
+
+        timestamp = datetime.now().strftime("%Y%m%d%H%M")
+        model_name = f"Model_{len(codes)}ETFs_{self._ml_config.predict_days}d_{timestamp}"
+        save_path = Path(self._ml_config.save_path) / f"{model_name}.ptp"
         save_path.parent.mkdir(parents=True, exist_ok=True)
         model_pkg.save(str(save_path))
         if model_pkg.metadata:
