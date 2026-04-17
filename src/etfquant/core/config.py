@@ -74,8 +74,8 @@ class AlphaConfig(BaseModel):
 
 
 class FactorScreenConfig(BaseModel):
-    ic_threshold: float = 0.03
-    rank_ic_threshold: float = 0.03
+    ic_threshold: float = 0.05
+    rank_ic_threshold: float = 0.05
     icir_threshold: float = 0.5
     mutual_ic_threshold: float = 0.7
     max_factors: int = 30

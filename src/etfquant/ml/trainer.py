@@ -249,12 +249,11 @@ class ModelTrainer:
             sklearn_params = {k: v for k, v in params.items() if k in ("max_depth", "learning_rate", "subsample", "n_estimators")}
             model = model_cls(**sklearn_params)
 
-        model.fit(
-            X_train_scaled,
-            y_train,
-            eval_set=[(X_val_scaled, y_val)] if model_cls.__module__.startswith("xgboost") else None,
-            verbose=False,
-        )
+        is_xgb = model_cls.__module__.startswith("xgboost")
+        if is_xgb:
+            model.fit(X_train_scaled, y_train, eval_set=[(X_val_scaled, y_val)], verbose=False)
+        else:
+            model.fit(X_train_scaled, y_train)
 
         feature_names = list(X.columns)
         metadata = {
