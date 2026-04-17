@@ -527,7 +527,8 @@ def create_factor_page(config: ETFQuantConfig) -> None:
                 ui.label("第一步：因子筛选").classes("text-h6 q-mb-md").style("color: #58a6ff")
                 ui.label("三级漏斗筛选：IC筛选 → ICIR筛选 → 去相关筛选。筛选结果自动保存，下方训练模型时会自动使用筛选后的因子作为特征。因子池不受影响，被筛掉的因子不会被删除。").classes("text-body2 q-mb-md").style("color: #8b949e")
                 with ui.row():
-                    s_ic = ui.number(label="IC阈值", value=config.ml.factor_screen.ic_threshold, format="%.4f", step=0.01, min=0.0, max=1.0).classes("q-mr-md").style("min-width: 160px")
+                    s_ic = ui.number(label="IC阈值", value=config.ml.factor_screen.ic_threshold, format="%.2f", step=0.01, min=0.0, max=1.0).classes("q-mr-md").style("min-width: 160px")
+                    s_ric = ui.number(label="RankIC阈值", value=config.ml.factor_screen.rank_ic_threshold, format="%.2f", step=0.01, min=0.0, max=1.0).classes("q-mr-md").style("min-width: 160px")
                     s_icir = ui.number(label="ICIR阈值", value=config.ml.factor_screen.icir_threshold, format="%.2f", step=0.1, min=0.0, max=10.0).classes("q-mr-md").style("min-width: 160px")
                     s_mutual = ui.number(label="互斥IC阈值", value=config.ml.factor_screen.mutual_ic_threshold, format="%.2f", step=0.05, min=0.0, max=1.0).classes("q-mr-md").style("min-width: 160px")
                     s_max = ui.number(label="最大因子数", value=config.ml.factor_screen.max_factors, step=1, min=1, max=100).classes("q-mr-md").style("min-width: 160px")
@@ -537,14 +538,16 @@ def create_factor_page(config: ETFQuantConfig) -> None:
                 ui.markdown("""
 **因子筛选三级漏斗说明：**
 
-| 层级 | 参数 | 建议范围 | 说明 |
-|------|------|----------|------|
-| 第一级 | IC阈值 | 0.02~0.05 | 因子IC绝对值需超过此值。0.03=常规标准，0.05=严格标准 |
-| 第二级 | ICIR阈值 | 0.3~1.0 | 因子ICIR绝对值需超过此值。0.5=稳定，1.0=非常稳定 |
-| 第三级 | 互斥IC阈值 | 0.5~0.8 | 两因子截面相关系数超过此值则视为相似，只保留IC更高的 |
-| 最终 | 最大因子数 | 10~30 | 最终保留的因子数量上限。太多会过拟合，太少信息不足 |
+| 层级 | 参数 | 建议范围 | 实际可取值范围 | 说明 |
+|------|------|----------|--------------|------|
+| 第一级 | IC阈值 | 0.02~0.05 | 0.00~1.00 | 因子IC绝对值需超过此值。0.03=常规标准，0.05=严格标准 |
+| 第二级 | ICIR阈值 | 0.3~1.0 | 0.00~10.00 | 因子ICIR绝对值需超过此值。0.5=稳定，1.0=非常稳定 |
+| 第三级 | 互斥IC阈值 | 0.5~0.8 | 0.00~1.00 | 两因子截面相关系数超过此值则视为相似，只保留IC更高的 |
+| 最终 | 最大因子数 | 10~30 | 1~100 | 最终保留的因子数量上限。太多会过拟合，太少信息不足 |
 
 **互斥IC阈值详解：**
+- **值越大**：去重越宽松，会保留更多相似因子，可能导致因子冗余，模型稳定性下降
+- **值越小**：去重越严格，可能过度去冗余，丢失互补信息，因子多样性不足
 - |corr| > 0.7 → 两个因子在说同一件事，只保留IC更高的
 - |corr| < 0.5 → 两个因子提供不同维度的信息，都保留
 - 设得太低(如0.3)会过度去冗余，可能丢失互补信息
@@ -677,6 +680,7 @@ def create_factor_page(config: ETFQuantConfig) -> None:
                 from etfquant.data.bridge import DataBridge
                 screen_config = FactorScreenConfig(
                     ic_threshold=s_ic.value,
+                    rank_ic_threshold=s_ric.value,
                     icir_threshold=s_icir.value,
                     mutual_ic_threshold=s_mutual.value,
                     max_factors=int(s_max.value),
@@ -720,7 +724,36 @@ def create_factor_page(config: ETFQuantConfig) -> None:
                     m["size_mb"] = f"{m['size_mb']:.2f}"
                 model_table.rows = models
 
+            def _load_screen_history():
+                latest = svc.get_latest_screen_result()
+                if not latest or not latest.get("selected_names"):
+                    return
+                selected_names = set(latest["selected_names"])
+                all_factors = svc.list_factors()
+                rows = []
+                for f in all_factors:
+                    if f["name"] in selected_names:
+                        rows.append({
+                            "name": f["name"],
+                            "ic": f"{f.get('ic', 0):.4f}",
+                            "rank_ic": f"{f.get('rank_ic', 0):.4f}",
+                            "icir": f"{f.get('icir', 0):.4f}",
+                        })
+                screen_table.rows = rows
+                screen_time = latest.get("created_at", "")
+                if "T" in screen_time:
+                    screen_time = screen_time.replace("T", " ")[:19]
+                screen_result.text = (
+                    f"📋 上次筛选结果({len(selected_names)}个因子, "
+                    f"筛选时间{screen_time}): "
+                    f"IC阈值={latest.get('ic_threshold', 0):.4f}, "
+                    f"ICIR阈值={latest.get('icir_threshold', 0):.2f}, "
+                    f"互斥IC阈值={latest.get('mutual_ic_threshold', 0):.2f}"
+                )
+                screen_result.style("color: #58a6ff")
+
             _refresh_models()
+            _load_screen_history()
 
         with ui.tab_panel("schedule"):
             with ui.card().classes("full-width"):

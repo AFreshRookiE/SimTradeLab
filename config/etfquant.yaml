@@ -1,0 +1,66 @@
+data:
+  data_root: "D:\\AKShare_Module\\data\\export"
+  classification_file: "D:\\AKShare_Module\\etf_classification.yaml"
+
+alpha:
+  enabled: true
+  ic_threshold: 0.03
+  rank_ic_threshold: 0.03
+  mutual_ic_threshold: 0.7
+  icir_threshold: 0.5
+  max_factors: 50
+  target_period: 20
+  use_gpu: true
+  device: "cuda"
+  save_path: "output/factors"
+  db_path: "output/factors/factor_store.db"
+  schedule:
+    enabled: false
+    start_time: "18:00"
+    end_time: "22:00"
+    days: ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
+  resources:
+    gpu_utilization_limit: 0.8
+    memory_limit_gb: 8.0
+    max_concurrent_tasks: 1
+
+ml:
+  enabled: true
+  model_type: "xgboost"
+  lookback_days: 60
+  predict_days: 5
+  train_ratio: 0.70
+  val_ratio: 0.15
+  parallel_jobs: -1
+  model_params:
+    max_depth: 4
+    learning_rate: 0.04
+    subsample: 0.7
+    colsample_bytree: 0.7
+    n_estimators: 200
+  save_path: "output/models"
+  factor_screen:
+    ic_threshold: 0.05
+    rank_ic_threshold: 0.05
+    icir_threshold: 0.5
+    mutual_ic_threshold: 0.7
+    max_factors: 30
+
+backtest:
+  enabled: true
+  initial_capital: 100000.0
+  frequency: "1d"
+  t_plus_1: false
+  commission_rate: 0.0003
+  slippage_rate: 0.001
+  min_trade_unit: 100
+  price_limit_pct: 0.10
+  benchmark: "510300.SH"
+  save_path: "output/backtest"
+
+ui:
+  theme: "dark"
+  language: "zh"
+  host: "localhost"
+  port: 8080
+  title: "ETFQuantDesk"
