@@ -68,7 +68,7 @@ _NAV_ITEMS = [
     ("/factor", "🧬", "因子管理"),
     ("/strategy", "📝", "策略编辑"),
     ("/backtest", "📈", "回测执行"),
-    ("/result", "📊", "结果展示"),
+    ("/result", "📊", "历史与对比"),
 ]
 
 _shared_state: dict[str, Any] = {}

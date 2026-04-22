@@ -31,7 +31,7 @@ def format_trades(trades: list[dict]) -> list[dict]:
 
 
 def _format_value(data: dict, label: str, key: str | None, fmt: str | None) -> str:
-    if key == "period":
+    if fmt == "period":
         return f"{data.get('start_date', '')} ~ {data.get('end_date', '')}"
     val = data.get(key or label, 0)
     if fmt == "comma":

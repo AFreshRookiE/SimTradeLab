@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import random
+import threading
 import time
 import warnings
 from dataclasses import dataclass, field
@@ -377,7 +378,8 @@ class FactorMiner:
     5. 高价值模板 + 更深嵌套(0-3层)
     """
 
-    def __init__(self, calculator: ETFAlphaCalculator, config: MiningConfig) -> None:
+    def __init__(self, calculator: ETFAlphaCalculator, config: MiningConfig,
+                 existing_factors: list[dict[str, Any]] | None = None) -> None:
         self._calc = calculator
         self._config = config
         self._rng = random.Random(config.seed)
@@ -387,10 +389,19 @@ class FactorMiner:
         self._best_ic: float = 0.0
         self._best_expr: str = ""
         self._prescreen_codes: list[str] = []
+        self._cancel_event = threading.Event()
+        self._existing_factors = existing_factors or []
         try:
             self._prescreen_codes = calculator._bridge.list_etf_codes()[:3]
         except Exception:
             pass
+
+    def cancel(self) -> None:
+        self._cancel_event.set()
+
+    @property
+    def is_cancelled(self) -> bool:
+        return self._cancel_event.is_set()
 
     def _quick_prescreen(self, expr: str) -> bool:
         if not self._prescreen_codes:
@@ -427,7 +438,8 @@ class FactorMiner:
     def _make_factor_name(self, expr: str, idx: int) -> str:
         return f"mined_{idx:04d}"
 
-    def mine(self, progress_callback: Callable[[int, int, str, dict], None] | None = None) -> MiningResult:
+    def mine(self, progress_callback: Callable[[int, int, str, dict], None] | None = None,
+             on_discover: Callable[[dict[str, Any]], None] | None = None) -> MiningResult:
         start_time = time.time()
         timeout = self._config.timeout_minutes * 60
         result = MiningResult()
@@ -468,7 +480,7 @@ class FactorMiner:
                 if step is not None:
                     desc += f", step={step}"
                 desc += ")"
-                valid_expressions[expr] = {
+                factor_dict = {
                     "name": name,
                     "expression": expr,
                     "ic": ic,
@@ -478,17 +490,26 @@ class FactorMiner:
                     "category": "mined",
                     "description": desc,
                 }
+                valid_expressions[expr] = factor_dict
                 self._population.append((expr, abs(ic)))
                 result.total_valid += 1
                 if abs(ic) > abs(self._best_ic):
                     self._best_ic = ic
                     self._best_expr = expr
+                if on_discover:
+                    try:
+                        on_discover(factor_dict)
+                    except Exception as exc:
+                        logger.warning("on_discover回调异常: %s", exc)
             _report()
             return ic
 
-        if self._config.strategy in ("UCB1搜索", "RL搜索", "UCB1+遗传组合", "RL+遗传组合"):
+        if self._config.strategy in ("UCB1搜索", "UCB1+遗传组合"):
             logger.info("开始UCB1引导因子搜索: n_steps=%d, batch_size=%d", self._config.n_steps, self._config.batch_size)
             for step in range(self._config.n_steps):
+                if self._cancel_event.is_set():
+                    logger.info("挖掘被用户取消，已运行 %d 步", step)
+                    break
                 if time.time() - start_time > timeout:
                     logger.info("搜索超时，已运行 %.1f 分钟", (time.time() - start_time) / 60)
                     break
@@ -508,7 +529,7 @@ class FactorMiner:
                         break
                     _eval_and_record(expr, step=step, desc_prefix="UCB1搜索")
 
-        if self._config.strategy in ("遗传搜索", "UCB1+遗传组合", "RL+遗传组合"):
+        if self._config.strategy in ("遗传搜索", "UCB1+遗传组合"):
             logger.info("开始遗传编程因子搜索")
             if not self._population:
                 for _ in range(min(100, self._config.batch_size)):
@@ -523,6 +544,9 @@ class FactorMiner:
             population_size = min(self._config.batch_size, 64)
 
             for gen in range(n_generations):
+                if self._cancel_event.is_set():
+                    logger.info("遗传搜索被用户取消，已运行 %d 代", gen)
+                    break
                 if time.time() - start_time > timeout:
                     logger.info("遗传搜索超时，已运行 %.1f 分钟", (time.time() - start_time) / 60)
                     break
@@ -550,6 +574,157 @@ class FactorMiner:
                     offspring[len(elite) + i] = (expr, abs(ic) if ic else 0.0)
 
                 self._population = offspring
+
+        if self._config.strategy == "因子组合搜索":
+            logger.info("开始因子组合搜索: 已有%d个因子", len(self._existing_factors))
+            valid_factors = [f for f in self._existing_factors if f.get("is_valid") or f.get("ic", 0) != 0]
+            if len(valid_factors) < 2:
+                logger.warning("因子组合搜索需要至少2个有效因子，当前仅%d个，退化为UCB1搜索", len(valid_factors))
+                for step in range(min(self._config.n_steps, 512)):
+                    if self._cancel_event.is_set() or time.time() - start_time > timeout:
+                        break
+                    if len(valid_expressions) >= self._config.max_factors:
+                        break
+                    batch_expressions = []
+                    for _ in range(self._config.batch_size):
+                        expr = self._gen.generate()
+                        if expr not in self._seen:
+                            self._seen.add(expr)
+                            batch_expressions.append(expr)
+                    for expr in batch_expressions:
+                        if time.time() - start_time > timeout:
+                            break
+                        _eval_and_record(expr, step=step, desc_prefix="组合退化为UCB1")
+            else:
+                valid_factors.sort(key=lambda f: abs(f.get("ic", 0)), reverse=True)
+                top_factors = valid_factors[:min(30, len(valid_factors))]
+                combo_templates = [
+                    "({a}) * ({b})",
+                    "({a}) + ({b})",
+                    "({a}) - ({b})",
+                    "({a}) / (({b}) + 1e-8)",
+                    "ts_rank({a}, 20) * sign({b})",
+                    "sign({a}) * abs({b})",
+                    "ts_rank({a}, 20) - ts_rank({b}, 20)",
+                    "ts_corr({a}, {b}, 20)",
+                ]
+                combo_count = 0
+                for i, f1 in enumerate(top_factors):
+                    if self._cancel_event.is_set() or time.time() - start_time > timeout:
+                        break
+                    if len(valid_expressions) >= self._config.max_factors:
+                        break
+                    for j in range(i + 1, len(top_factors)):
+                        if self._cancel_event.is_set() or time.time() - start_time > timeout:
+                            break
+                        if len(valid_expressions) >= self._config.max_factors:
+                            break
+                        f2 = top_factors[j]
+                        e1 = f1.get("expression", "")
+                        e2 = f2.get("expression", "")
+                        if not e1 or not e2:
+                            continue
+                        for tmpl in combo_templates:
+                            if self._cancel_event.is_set() or time.time() - start_time > timeout:
+                                break
+                            if len(valid_expressions) >= self._config.max_factors:
+                                break
+                            expr = tmpl.format(a=e1, b=e2)
+                            if expr not in self._seen:
+                                self._seen.add(expr)
+                                combo_count += 1
+                                _eval_and_record(expr, desc_prefix="因子组合")
+                logger.info("因子组合搜索完成: 尝试%d个组合", combo_count)
+
+        if self._config.strategy == "模因搜索":
+            logger.info("开始模因搜索: 遗传搜索+局部参数微调")
+            if not self._population:
+                for _ in range(min(100, self._config.batch_size)):
+                    if time.time() - start_time > timeout:
+                        break
+                    expr = self._gen.generate()
+                    if expr not in self._seen:
+                        self._seen.add(expr)
+                        _eval_and_record(expr, desc_prefix="模因初始化")
+
+            n_generations = min(self._config.n_steps // 10, 200)
+            population_size = min(self._config.batch_size, 64)
+
+            for gen in range(n_generations):
+                if self._cancel_event.is_set():
+                    logger.info("模因搜索被用户取消，已运行 %d 代", gen)
+                    break
+                if time.time() - start_time > timeout:
+                    break
+                if len(valid_expressions) >= self._config.max_factors:
+                    break
+
+                self._population.sort(key=lambda x: x[1], reverse=True)
+                elite = self._population[:max(population_size // 4, 4)]
+                offspring = list(elite)
+
+                while len(offspring) < population_size:
+                    t1 = self._rng.choice(elite)[0]
+                    t2 = self._rng.choice(elite)[0]
+                    child = self._gen.crossover(t1, t2)
+                    if self._rng.random() < 0.3:
+                        child = self._gen.mutate(child)
+                    if child not in self._seen:
+                        self._seen.add(child)
+                        offspring.append((child, 0.0))
+
+                memetic_offspring = []
+                for expr, score in offspring:
+                    if self._cancel_event.is_set() or time.time() - start_time > timeout:
+                        break
+                    best_expr_local = expr
+                    best_ic_local = score
+                    for w in _WINDOWS:
+                        for d in _DELTAS:
+                            for old_w in _WINDOWS:
+                                candidate = expr.replace(f", {old_w})", f", {w})")
+                                if candidate == expr:
+                                    continue
+                                for old_d in _DELTAS:
+                                    candidate2 = candidate.replace(f", {old_d})", f", {d})")
+                                    if candidate2 in self._seen:
+                                        continue
+                                    self._seen.add(candidate2)
+                                    ic_val = self._quick_prescreen(candidate2)
+                                    if ic_val is False:
+                                        continue
+                                    ic, ric, icir, ic_p = self._evaluate_expression(candidate2)
+                                    evaluated_count += 1
+                                    result.total_evaluated += 1
+                                    is_valid = self._is_valid(ic, ric, icir, ic_p)
+                                    self._gen.record_result(candidate2, ic, is_valid)
+                                    if abs(ic) > abs(best_ic_local):
+                                        best_expr_local = candidate2
+                                        best_ic_local = abs(ic)
+                                    if is_valid:
+                                        name = self._make_factor_name(candidate2, factor_idx)
+                                        factor_idx += 1
+                                        factor_dict = {
+                                            "name": name, "expression": candidate2,
+                                            "ic": ic, "rank_ic": ric, "icir": icir,
+                                            "is_valid": True, "category": "mined",
+                                            "description": f"模因搜索发现(局部微调)",
+                                        }
+                                        valid_expressions[candidate2] = factor_dict
+                                        self._population.append((candidate2, abs(ic)))
+                                        result.total_valid += 1
+                                        if abs(ic) > abs(self._best_ic):
+                                            self._best_ic = ic
+                                            self._best_expr = candidate2
+                                        if on_discover:
+                                            try:
+                                                on_discover(factor_dict)
+                                            except Exception as exc:
+                                                logger.warning("on_discover回调异常: %s", exc)
+                                    _report()
+                    memetic_offspring.append((best_expr_local, best_ic_local))
+
+                self._population = memetic_offspring
 
         _report(force=True)
         result.discovered = list(valid_expressions.values())

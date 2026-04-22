@@ -1,10 +1,26 @@
 from __future__ import annotations
 
+from datetime import date, timedelta
+
 from nicegui import ui
 
 from etfquant.core.config import ETFQuantConfig
 from etfquant.api.data import DataService
 from etfquant.ui.echart_theme import ECHART_XAXIS, ECHART_YAXIS, KLINE_COLORS
+
+
+def _prev_trading_day() -> str:
+    today = date.today()
+    if today.weekday() == 5:
+        offset = 1
+    elif today.weekday() == 6:
+        offset = 2
+    elif today.weekday() == 0:
+        offset = 3
+    else:
+        offset = 1
+    prev = today - timedelta(days=offset)
+    return prev.strftime("%Y%m%d")
 
 
 def _calc_ma(data: list[float | None], n: int) -> list[float | None]:
@@ -74,7 +90,7 @@ def create_data_page(config: ETFQuantConfig) -> None:
         with ui.row().classes("full-width").style("display: flex; flex-wrap: nowrap; gap: 16px;"):
             with ui.column().style("flex: 0 0 45%; max-width: 45%;"):
                 with ui.card().classes("full-width q-mb-md").style("border-radius: 12px !important;"):
-                    hot_label = ui.label("✨ 金叉信号 ETF").classes("text-subtitle2 q-pa-sm q-mb-none").style("color: #f0883e")
+                    hot_label = ui.label("✨ 金叉信号 ETF").classes("text-h6 q-pa-sm q-mb-none").style("color: #f0883e")
                     etf_table = ui.table(
                         columns=[
                             {"name": "code", "label": "代码", "field": "code", "sortable": True, "align": "left", "width": "120px"},
@@ -100,7 +116,7 @@ def create_data_page(config: ETFQuantConfig) -> None:
                             "dense outlined dark"
                         ).style("width: 140px; font-size: 13px; margin-right: 8px")
                         ui.label("~").style("color: #8b949e; font-size: 13px; margin-right: 8px")
-                        end_date_input = ui.input(value="20261231", placeholder="结束 YYYYMMDD").props(
+                        end_date_input = ui.input(value=_prev_trading_day(), placeholder="结束 YYYYMMDD").props(
                             "dense outlined dark"
                         ).style("width: 140px; font-size: 13px; margin-right: 8px")
                         ui.button("🔍 查询", on_click=lambda: _update_chart(), color="primary").props("dense").style("margin-right: 4px")

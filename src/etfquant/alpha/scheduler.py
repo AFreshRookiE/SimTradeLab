@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 import threading
-import time
-from datetime import datetime, time as dt_time
+from datetime import date, datetime, time as dt_time
 from typing import Any, Callable
 
 from etfquant.core.config import ScheduleConfig
@@ -11,6 +10,11 @@ from etfquant.core.logger import get_logger
 __all__ = ["AlphaScheduler"]
 
 logger = get_logger("etfquant.alpha.scheduler")
+
+_DAY_CN = {
+    "Monday": "周一", "Tuesday": "周二", "Wednesday": "周三",
+    "Thursday": "周四", "Friday": "周五", "Saturday": "周六", "Sunday": "周日",
+}
 
 
 class AlphaScheduler:
@@ -24,6 +28,7 @@ class AlphaScheduler:
         self._status = "idle"
         self._last_run: str = ""
         self._next_run: str = ""
+        self._last_run_date: str = ""
 
     @property
     def status(self) -> str:
@@ -55,7 +60,8 @@ class AlphaScheduler:
         self._status = "running"
         self._thread = threading.Thread(target=self._run_loop, daemon=True)
         self._thread.start()
-        logger.info("调度器已启动: %s-%s, days=%s", self._config.start_time, self._config.end_time, self._config.days)
+        days_cn = ", ".join(_DAY_CN.get(d, d) for d in self._config.days)
+        logger.info("调度器已启动: %s-%s, 运行日=%s", self._config.start_time, self._config.end_time, days_cn)
 
     def stop(self) -> None:
         self._running = False
@@ -92,7 +98,7 @@ class AlphaScheduler:
             day_name = now.strftime("%A")
 
             if day_name not in self._config.days:
-                self._next_run = f"下一个工作日 ({day_name} 不在运行日)"
+                self._next_run = f"下一个运行日（今日{_DAY_CN.get(day_name, day_name)}不在运行日）"
                 self._stop_event.wait(60)
                 continue
 
@@ -107,14 +113,21 @@ class AlphaScheduler:
                 continue
 
             current_t = now.time()
+            today_str = date.today().isoformat()
 
             if start_t <= current_t <= end_t:
+                if self._last_run_date == today_str:
+                    self._next_run = "今日已执行，明日继续"
+                    self._stop_event.wait(60)
+                    continue
+
                 self._next_run = "正在执行..."
                 self._status = "executing"
                 try:
                     logger.info("定时任务开始执行: %s", now.isoformat())
                     self._task_func()
                     self._last_run = now.isoformat()
+                    self._last_run_date = today_str
                     logger.info("定时任务执行完成: %s", now.isoformat())
                 except Exception as exc:
                     logger.error("定时任务执行失败: %s", exc)
@@ -128,6 +141,7 @@ class AlphaScheduler:
                 self._stop_event.wait(30)
 
     def get_status(self) -> dict[str, Any]:
+        days_cn = [_DAY_CN.get(d, d) for d in self._config.days]
         return {
             "enabled": self._config.enabled,
             "running": self._running,
@@ -135,6 +149,7 @@ class AlphaScheduler:
             "status": self._status,
             "schedule": f"{self._config.start_time}-{self._config.end_time}",
             "days": self._config.days,
+            "days_cn": days_cn,
             "last_run": self._last_run,
             "next_run": self._next_run,
         }

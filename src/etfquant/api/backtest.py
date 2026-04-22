@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +13,8 @@ from etfquant.backtest.engine import ETFBacktester, BacktestResult
 __all__ = ["BacktestService"]
 
 logger = get_logger("etfquant.api.backtest")
+
+_BACKTEST_HISTORY_FILE = "output/backtest/backtest_history.json"
 
 _STRATEGY_DESC: dict[str, str] = {
     "ma_cross": "双均线交叉策略：短期均线上穿长期均线买入，下穿卖出",
@@ -70,9 +74,10 @@ def handle_data(context, data):
 
 
 class BacktestService:
-    def __init__(self, config: BacktestConfig, data_config: Any) -> None:
+    def __init__(self, config: BacktestConfig, data_config: Any, ml_config: Any = None) -> None:
         self._config = config
         self._data_config = data_config
+        self._ml_config = ml_config
         self._last_result: BacktestResult | None = None
 
     def list_strategies(self) -> list[dict[str, str]]:
@@ -83,6 +88,7 @@ class BacktestService:
                 ("momentum", "动量策略"),
                 ("mean_reversion", "均值回归"),
                 ("etf_premium", "ETF折溢价套利"),
+                ("ml_model", "ML模型策略"),
             ]
         ]
 
@@ -94,10 +100,20 @@ class BacktestService:
         code: str,
         strategy_type: str = "ma",
         model_path: str | None = None,
+        strategy_code: str | None = None,
         initial_capital: float | None = None,
         t_plus_1: bool | None = None,
         commission_rate: float | None = None,
         slippage_rate: float | None = None,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        ma_short: int = 5,
+        ma_long: int = 20,
+        momentum_lookback: int = 20,
+        mr_lookback: int = 20,
+        mr_entry_z: float = -2.0,
+        mr_exit_z: float = 0.0,
+        premium_threshold: float = 0.005,
     ) -> dict[str, Any]:
         import pandas as pd
 
@@ -109,45 +125,74 @@ class BacktestService:
         })
 
         bridge = DataBridge(self._data_config)
-        backtester = ETFBacktester(bridge, config)
+        backtester = ETFBacktester(bridge, config, self._ml_config)
         price_df = bridge.load_etf_daily(code)
 
         if price_df.empty:
             return {"success": False, "error": f"无数据: {code}"}
 
+        if start_date:
+            try:
+                sd = pd.Timestamp(start_date)
+                price_df = price_df[price_df.index >= sd]
+            except Exception:
+                pass
+        if end_date:
+            try:
+                ed = pd.Timestamp(end_date)
+                price_df = price_df[price_df.index <= ed]
+            except Exception:
+                pass
+        if price_df.empty:
+            return {"success": False, "error": f"回测区间内无数据: {code} {start_date}~{end_date}"}
+
         if strategy_type == "ml_model" and model_path:
             from etfquant.ml.trainer import ModelPackage
             model_pkg = ModelPackage.load(model_path)
             result = backtester.run_model_backtest(model_pkg, code, "ML模型策略")
+        elif strategy_type == "custom" and strategy_code:
+            result = backtester.run_strategy_backtest(strategy_code, code, "自定义策略")
         else:
             signals = pd.DataFrame(index=price_df.index)
             signals["signal"] = 0
             close = price_df["close"].astype(float)
 
-            if strategy_type == "ma":
-                ma_short = close.rolling(5).mean()
-                ma_long = close.rolling(20).mean()
-                signals.loc[ma_short > ma_long, "signal"] = 1
-                signals.loc[ma_short < ma_long, "signal"] = -1
-                result = backtester.run_signal_backtest(signals, code, "MA5/MA20均线策略")
+            if strategy_type in ("ma", "ma_cross"):
+                ma_s = close.rolling(ma_short).mean()
+                ma_l = close.rolling(ma_long).mean()
+                signals.loc[ma_s > ma_l, "signal"] = 1
+                signals.loc[ma_s < ma_l, "signal"] = -1
+                result = backtester.run_signal_backtest(signals, code, f"MA{ma_short}/MA{ma_long}均线策略")
             elif strategy_type == "momentum":
-                ret_20 = close.pct_change(20)
-                signals.loc[ret_20 > 0, "signal"] = 1
-                signals.loc[ret_20 < 0, "signal"] = -1
-                result = backtester.run_signal_backtest(signals, code, "20日动量策略")
+                ret_n = close.pct_change(momentum_lookback)
+                signals.loc[ret_n > 0, "signal"] = 1
+                signals.loc[ret_n < 0, "signal"] = -1
+                result = backtester.run_signal_backtest(signals, code, f"{momentum_lookback}日动量策略")
             elif strategy_type == "mean_reversion":
-                mean = close.rolling(20).mean()
-                std = close.rolling(20).std()
+                mean = close.rolling(mr_lookback).mean()
+                std = close.rolling(mr_lookback).std()
                 z = (close - mean) / std
-                signals.loc[z < -2, "signal"] = 1
-                signals.loc[z > 0, "signal"] = -1
-                result = backtester.run_signal_backtest(signals, code, "均值回归策略")
+                signals.loc[z < mr_entry_z, "signal"] = 1
+                signals.loc[z > mr_exit_z, "signal"] = -1
+                result = backtester.run_signal_backtest(signals, code, f"均值回归(Z<{mr_entry_z})策略")
+            elif strategy_type == "etf_premium":
+                if "premium_rate" in price_df.columns:
+                    premium = price_df["premium_rate"].astype(float)
+                    signals.loc[premium < -premium_threshold, "signal"] = 1
+                    signals.loc[premium > premium_threshold, "signal"] = -1
+                    result = backtester.run_signal_backtest(signals, code, f"ETF折溢价(阈值{premium_threshold:.4f})策略")
+                else:
+                    ma_s = close.rolling(ma_short).mean()
+                    ma_l = close.rolling(ma_long).mean()
+                    signals.loc[ma_s > ma_l, "signal"] = 1
+                    signals.loc[ma_s < ma_l, "signal"] = -1
+                    result = backtester.run_signal_backtest(signals, code, f"MA{ma_short}/MA{ma_long}均线策略(折溢价数据不可用)")
             else:
-                ma_short = close.rolling(5).mean()
-                ma_long = close.rolling(20).mean()
-                signals.loc[ma_short > ma_long, "signal"] = 1
-                signals.loc[ma_short < ma_long, "signal"] = -1
-                result = backtester.run_signal_backtest(signals, code, "MA5/MA20均线策略")
+                ma_s = close.rolling(ma_short).mean()
+                ma_l = close.rolling(ma_long).mean()
+                signals.loc[ma_s > ma_l, "signal"] = 1
+                signals.loc[ma_s < ma_l, "signal"] = -1
+                result = backtester.run_signal_backtest(signals, code, f"MA{ma_short}/MA{ma_long}均线策略")
 
         self._last_result = result
         return self._result_to_dict(result)
@@ -215,3 +260,73 @@ class BacktestService:
             "total_trades": result.total_trades,
             "nav_count": len(result.nav_series),
         }
+
+    def save_backtest_result(self, result: dict[str, Any], code: str, strategy_type: str, model_path: str | None = None) -> str:
+        if not result.get("success"):
+            return ""
+        history_path = Path(_BACKTEST_HISTORY_FILE)
+        history_path.parent.mkdir(parents=True, exist_ok=True)
+        history: list[dict[str, Any]] = []
+        if history_path.exists():
+            try:
+                with open(history_path, "r", encoding="utf-8") as f:
+                    history = json.load(f)
+            except Exception:
+                history = []
+        entry = {
+            "id": datetime.now().strftime("%Y%m%d%H%M%S") + f"_{code}",
+            "timestamp": datetime.now().isoformat(),
+            "code": code,
+            "strategy_type": strategy_type,
+            "model_name": Path(model_path).stem if model_path else "",
+            **{k: v for k, v in result.items() if k != "success"},
+        }
+        history.append(entry)
+        if len(history) > 500:
+            history = history[-500:]
+        with open(history_path, "w", encoding="utf-8") as f:
+            json.dump(history, f, ensure_ascii=False, indent=2)
+        logger.info("回测结果已保存: %s %s", code, strategy_type)
+        return entry["id"]
+
+    def get_backtest_history(self, code: str | None = None, strategy_type: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        history_path = Path(_BACKTEST_HISTORY_FILE)
+        if not history_path.exists():
+            return []
+        try:
+            with open(history_path, "r", encoding="utf-8") as f:
+                history = json.load(f)
+        except Exception:
+            return []
+        if code:
+            history = [h for h in history if h.get("code") == code]
+        if strategy_type:
+            history = [h for h in history if h.get("strategy_type") == strategy_type]
+        return history[-limit:]
+
+    def delete_backtest_history(self, entry_id: str) -> bool:
+        history_path = Path(_BACKTEST_HISTORY_FILE)
+        if not history_path.exists():
+            return False
+        try:
+            with open(history_path, "r", encoding="utf-8") as f:
+                history = json.load(f)
+        except Exception:
+            return False
+        new_history = [h for h in history if h.get("id") != entry_id]
+        if len(new_history) == len(history):
+            return False
+        with open(history_path, "w", encoding="utf-8") as f:
+            json.dump(new_history, f, ensure_ascii=False, indent=2)
+        return True
+
+    def get_backtest_comparison(self, entry_ids: list[str]) -> list[dict[str, Any]]:
+        history_path = Path(_BACKTEST_HISTORY_FILE)
+        if not history_path.exists():
+            return []
+        try:
+            with open(history_path, "r", encoding="utf-8") as f:
+                history = json.load(f)
+        except Exception:
+            return []
+        return [h for h in history if h.get("id") in entry_ids]

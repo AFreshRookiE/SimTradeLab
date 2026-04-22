@@ -102,7 +102,7 @@ class MLConfig(BaseModel):
 
 class BacktestConfig(BaseModel):
     enabled: bool = True
-    initial_capital: float = 100000.0
+    initial_capital: float = 20000.0
     frequency: str = "1d"
     t_plus_1: bool = False
     commission_rate: float = 0.0003

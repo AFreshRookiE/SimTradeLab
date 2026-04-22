@@ -162,6 +162,7 @@ class ModelPackage:
     scaler: Any = None
     metadata: dict[str, Any] = None
     feature_names: list[str] = None
+    factor_expressions: list[dict[str, Any]] = None
 
     def save(self, path: str) -> None:
         import pickle
@@ -171,6 +172,7 @@ class ModelPackage:
             "scaler": self.scaler,
             "metadata": self.metadata or {},
             "feature_names": self.feature_names or [],
+            "factor_expressions": self.factor_expressions or [],
         }
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         with open(path, "wb") as f:
@@ -188,6 +190,7 @@ class ModelPackage:
             scaler=data.get("scaler"),
             metadata=data.get("metadata", {}),
             feature_names=data.get("feature_names", []),
+            factor_expressions=data.get("factor_expressions", []),
         )
 
     def predict(self, features: pd.DataFrame) -> np.ndarray:
@@ -201,7 +204,8 @@ class ModelTrainer:
     def __init__(self, config: MLConfig) -> None:
         self._config = config
 
-    def train(self, X: pd.DataFrame, y: pd.Series, dates: pd.Series) -> ModelPackage:
+    def train(self, X: pd.DataFrame, y: pd.Series, dates: pd.Series,
+              factor_expressions: list[dict[str, Any]] | None = None) -> ModelPackage:
         try:
             from sklearn.preprocessing import StandardScaler
         except ImportError:
@@ -272,6 +276,7 @@ class ModelTrainer:
             scaler=scaler,
             metadata=metadata,
             feature_names=feature_names,
+            factor_expressions=factor_expressions,
         )
         logger.info("模型训练完成: %d 训练样本, %d 验证样本, %d 特征", len(X_train), len(X_val), len(feature_names))
         return pkg

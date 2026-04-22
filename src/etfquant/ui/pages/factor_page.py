@@ -77,8 +77,10 @@ _MINING_HINTS = """
 
 **搜索策略说明：**
 - **UCB1搜索**：使用UCB1多臂老虎机算法智能探索因子表达式空间。自动平衡探索（尝试新算子组合）与利用（聚焦高成功率算子），同时利用n-gram条件概率实现上下文感知的算子选择，比随机搜索效率更高
-- **遗传搜索**：模拟自然选择，对已有有效因子进行语法树交叉和变异产生新因子，适合在已有因子池基础上扩展
+- **遗传搜索**：模拟自然选择，对已有有效因子进行语法树交叉和变异产生新因子。若因子池为空（冷启动），会先用随机生成器创建初始种群，再进入遗传进化阶段
 - **UCB1+遗传组合**：先用UCB1搜索发现初始因子，再用遗传搜索在已有因子基础上优化
+- **因子组合搜索**：不搜索全新表达式，而是将因子池中已有的有效因子进行二元组合（相乘、相加、rank×sign等），寻找互补性更强的组合因子。搜索空间小、效率极高，适合因子池已有一定积累后使用
+- **模因搜索**：在遗传搜索基础上增加局部搜索，对每个候选表达式的窗口参数和delta参数做穷举微调。很多因子"差一点就有效"（如窗口从20改为10），模因搜索能快速找到这些近优解
 
 **算法改进（v2.0）：**
 1. **UCB1置信上界**：替代硬编码的30%/70%探索/利用比例，根据统计置信度自动调节
@@ -94,6 +96,7 @@ _MINING_HINTS = """
 | 512 | 64 | ~5分钟 | 快速验证 |
 | 2048 | 64 | ~20分钟 | 标准搜索 |
 | 4096 | 128 | ~60分钟 | 深度搜索 |
+| 4096 | 512 | ~2小时 | 深度大batch搜索 |
 | 8192 | 256 | ~2小时+ | 穷举搜索 |
 """
 
@@ -207,6 +210,7 @@ def create_factor_page(config: ETFQuantConfig) -> None:
                 ui.button("💾 导出Parquet", on_click=lambda: _export()).props("flat").style("color: #3fb950").on("mouseover", lambda: ui.tooltip("导出因子库为Parquet文件，可用于Jupyter分析或分享给团队"))
                 ui.button("🗑 清空无效", on_click=lambda: _clear_invalid()).props("flat").style("color: #f85149").on("mouseover", lambda: ui.tooltip("删除有效性为❌的因子，不可恢复！"))
                 ui.button("🔄 重新校验", on_click=lambda: _revalidate()).props("flat").style("color: #58a6ff").on("mouseover", lambda: ui.tooltip("按当前IC/ICIR阈值重新判定所有因子的有效性"))
+                ui.button("🗑 删除选中", on_click=lambda: _delete_selected()).props("flat").style("color: #f85149").on("mouseover", lambda: ui.tooltip("删除勾选的因子，不可恢复！"))
                 ui.space()
                 pool_count_label = ui.label("").classes("text-caption").style("color: #8b949e")
 
@@ -219,11 +223,14 @@ def create_factor_page(config: ETFQuantConfig) -> None:
                     {"name": "is_valid", "label": "有效性", "field": "is_valid", "align": "center", "width": "60px"},
                     {"name": "category_label", "label": "分类", "field": "category_label", "sortable": True, "align": "center", "width": "80px"},
                     {"name": "updated_at", "label": "更新时间", "field": "updated_at", "sortable": True, "align": "center", "width": "140px"},
+                    {"name": "detail", "label": "详情", "field": "detail", "align": "center", "width": "60px"},
                 ],
                 rows=[],
                 row_key="name",
+                selection="multiple",
                 pagination={"rowsPerPage": 5, "rowsPerPageOptions": [5, 10, 20, 50]},
-            ).classes("full-width").props('resizable-columns separator="cell"').on("rowClick", lambda e: _on_row_click(e), [[], ["name"], None])
+            ).classes("full-width").props('resizable-columns separator="cell"')
+            factor_table.on("rowClick", lambda e: _on_row_click(e))
 
             with ui.card().classes("full-width q-mt-md").style("border-radius: 12px !important; border: 1px solid #30363d !important;"):
                 detail_title = ui.label("📋 点击因子查看详情").classes("text-subtitle1 q-mb-sm").style("color: #58a6ff")
@@ -281,6 +288,7 @@ def create_factor_page(config: ETFQuantConfig) -> None:
                     if "T" in ts:
                         ts = ts.replace("T", " ")[:19]
                     r["updated_at"] = ts
+                    r["detail"] = "🔍"
                 factor_table.rows = rows
                 valid_count = sum(1 for r in rows if r["is_valid"] == "✅")
                 pool_count_label.text = f"共 {len(rows)} 个因子，{valid_count} 个有效"
@@ -292,6 +300,20 @@ def create_factor_page(config: ETFQuantConfig) -> None:
             def _clear_invalid():
                 count = svc.clear_invalid()
                 ui.notify(f"已清除 {count} 个无效因子", type="positive")
+                _refresh_pool()
+
+            def _delete_selected():
+                selected = factor_table.selected
+                if not selected:
+                    ui.notify("请先勾选要删除的因子", type="warning")
+                    return
+                names = [r["name"] if isinstance(r, dict) else r for r in selected]
+                count = 0
+                for name in names:
+                    if svc.delete_factor(name):
+                        count += 1
+                ui.notify(f"已删除 {count} 个因子", type="positive")
+                factor_table.selected = []
                 _refresh_pool()
 
             def _revalidate():
@@ -449,35 +471,70 @@ def create_factor_page(config: ETFQuantConfig) -> None:
                 ui.label("因子挖掘").classes("text-h6 q-mb-sm").style("color: #58a6ff")
                 ui.label("自动搜索新的有效因子表达式，发现后自动存入因子池").classes("text-body2 q-mb-md").style("color: #8b949e")
                 with ui.row().classes("full-width"):
-                    nsteps_input = ui.number(label="搜索步数(N-steps)", value=2048, min=64, max=8192, step=256).classes("q-mr-md").style("min-width: 200px")
-                    batch_input = ui.number(label="批大小(batch_size)", value=config.alpha.rl_batch_size, min=16, max=1024, step=16).classes("q-mr-md").style("min-width: 200px")
+                    nsteps_input = ui.number(label="搜索步数(N-steps)", value=4096, min=64, max=8192, step=256).classes("q-mr-md").style("min-width: 200px")
+                    batch_input = ui.number(label="批大小(batch_size)", value=512, min=16, max=1024, step=16).classes("q-mr-md").style("min-width: 200px")
                 with ui.row().classes("full-width q-mt-md"):
-                    timeout_input = ui.number(label="最大搜索时长(分钟)", value=30, min=1, max=480, step=5).classes("q-mr-md").style("min-width: 200px")
-                    max_mining_input = ui.number(label="最大因子数", value=50, min=1, max=200, step=5).classes("q-mr-md").style("min-width: 200px")
-                with ui.row().classes("full-width q-mt-md"):
-                    strategy_select = ui.select(label="搜索策略", options=["UCB1搜索", "遗传搜索", "UCB1+遗传组合"], value="UCB1搜索").classes("q-mr-md").style("min-width: 200px")
-                ui.button("🚀 开始挖掘", on_click=lambda: _start_mining(), color="primary").classes("q-mt-md")
+                    timeout_input = ui.number(label="最大搜索时长(分钟)", value=480, min=1, max=480, step=5).classes("q-mr-md").style("min-width: 200px")
+                    max_mining_input = ui.number(label="最大因子数", value=100, min=1, max=200, step=5).classes("q-mr-md").style("min-width: 200px")
+                with ui.row().classes("full-width q-mt-md items-center"):
+                    strategy_select = ui.select(label="搜索策略", options=["UCB1搜索", "遗传搜索", "UCB1+遗传组合", "因子组合搜索", "模因搜索"], value="UCB1+遗传组合").classes("q-mr-md").style("min-width: 200px")
+                with ui.row().classes("q-mt-md items-center"):
+                    mining_btn = ui.button("🚀 开始挖掘", on_click=lambda: _start_mining(), color="primary")
+                    stop_mining_btn = ui.button("⏹ 停止挖掘", on_click=lambda: _stop_mining(), color="negative").style("display: none;")
                 mining_progress = ui.linear_progress(value=0.0, size="6px").classes("q-mt-sm").style("display: none;")
                 mining_status = ui.label("").classes("text-body2 q-mt-xs").style("color: #8b949e")
+                mining_log = ui.column().classes("full-width q-mt-sm").style("max-height: 180px; overflow-y: auto; background: #0d1117; border: 1px solid #30363d; border-radius: 4px; padding: 8px;")
+                mining_log_lines: list[str] = []
+
+            def _mining_log(msg: str) -> None:
+                import time as _t
+                ts = _t.strftime("%H:%M:%S")
+                line = f"[{ts}] {msg}"
+                mining_log_lines.append(line)
+                if len(mining_log_lines) > 100:
+                    mining_log_lines.pop(0)
+                mining_log.clear()
+                with mining_log:
+                    for l in mining_log_lines[-30:]:
+                        ui.label(l).classes("text-caption").style("color: #8b949e; font-family: monospace; line-height: 1.4;")
 
             with ui.expansion("📖 因子挖掘参数说明", icon="help").classes("full-width q-mb-md").style("border: 1px solid #30363d; border-radius: 8px;"):
                 ui.markdown(_MINING_HINTS).style("color: #c9d1d9; font-size: 13px;")
 
-            async def _start_mining():
+            def _set_mining_ui_running(running: bool) -> None:
+                if running:
+                    mining_btn.text = "⏳ 挖掘进行中..."
+                    mining_btn.props("color=orange disable")
+                    stop_mining_btn.style("display: inline-flex;")
+                    mining_progress.style("display: block;")
+                else:
+                    mining_btn.text = "🚀 开始挖掘"
+                    mining_btn.props("color=primary")
+                    mining_btn.props(remove="disable")
+                    stop_mining_btn.style("display: none;")
+
+            def _stop_mining() -> None:
+                result = svc.stop_mining()
+                if result.get("status") == "cancelling":
+                    mining_status.text = "⏹ 正在停止挖掘（等待当前评估完成）..."
+                    mining_status.style("color: #d29922")
+                    ui.notify("已发送停止信号，挖掘将在当前评估完成后停止", type="info")
+                else:
+                    ui.notify("当前没有正在执行的挖掘任务", type="warning")
+
+            def _start_mining() -> None:
+                status = svc.get_mining_status()
+                if status.get("running"):
+                    ui.notify("挖掘任务正在执行中，请等待完成", type="warning")
+                    return
+                _set_mining_ui_running(True)
                 mining_status.text = "⏳ 正在准备..."
                 mining_status.style("color: #58a6ff")
                 mining_progress.value = 0.0
-                mining_progress.style("display: block;")
-                shared = {"pct": 0, "msg": "准备中...", "done": False, "result": None, "error": None}
-
-                def on_mining_progress(current: int, total: int, msg: str, info: dict) -> None:
-                    pct = info.get("pct", 0)
-                    shared["pct"] = pct
-                    shared["msg"] = msg
 
                 def _run():
                     try:
-                        r = svc.mine_factors(
+                        svc.mine_factors(
                             n_steps=int(nsteps_input.value),
                             batch_size=int(batch_input.value),
                             timeout_minutes=timeout_input.value,
@@ -489,38 +546,56 @@ def create_factor_page(config: ETFQuantConfig) -> None:
                             target_period=period_input.value,
                             max_etf_for_ic=max_etf_ic_input.value,
                             max_etf_for_mutual_ic=max_etf_mutual_input.value,
-                            progress_callback=on_mining_progress,
                         )
-                        shared["result"] = r
                     except Exception as e:
-                        shared["error"] = str(e)
-                    finally:
-                        shared["done"] = True
-
-                timer = ui.timer(1.0, lambda: _update_mining_progress(shared))
-
-                def _update_mining_progress(state: dict) -> None:
-                    if state["done"]:
-                        timer.active = False
-                        mining_progress.value = 1.0
-                        if state["error"]:
-                            mining_status.text = f"❌ 挖掘失败: {state['error']}"
-                            mining_status.style("color: #f85149")
-                            mining_progress.style("display: none;")
-                        else:
-                            r = state["result"]
-                            elapsed = r.get("elapsed_seconds", 0) or 0
-                            n_valid = r.get("total_valid", 0) or 0
-                            n_eval = r.get("total_evaluated", 0) or 0
-                            best_ic = r.get("best_ic", 0) or 0
-                            mining_status.text = f"✅ 完成: 评估{n_eval}个, 发现{n_valid}个有效因子, 耗时{elapsed:.0f}s, 最佳IC={best_ic:.4f}"
-                            mining_status.style("color: #3fb950")
-                            _refresh_pool()
-                    else:
-                        mining_progress.value = state["pct"] / 100.0
-                        mining_status.text = f"⏳ {state['msg']} {state['pct']}%"
+                        logger.error("挖掘异常: %s", e)
 
                 asyncio.get_event_loop().run_in_executor(None, _run)
+
+            _notified_mining_done = {"done": False}
+            _last_logged_pct = {"pct": -1}
+
+            def _poll_mining_status() -> None:
+                status = svc.get_mining_status()
+                if status.get("running"):
+                    _notified_mining_done["done"] = False
+                    _set_mining_ui_running(True)
+                    pct = status.get("pct", 0)
+                    msg = status.get("msg", "")
+                    mining_progress.value = pct / 100.0
+                    start = status.get("start_time", "")
+                    elapsed_hint = f" (启动于 {start[:19]})" if start else ""
+                    mining_status.text = f"⏳ {msg} {pct}%{elapsed_hint}"
+                    mining_status.style("color: #58a6ff")
+                    if pct // 10 != _last_logged_pct["pct"] // 10 and pct > 0:
+                        _last_logged_pct["pct"] = pct
+                        _mining_log(f"{msg} {pct}%")
+                elif status.get("result"):
+                    _set_mining_ui_running(False)
+                    r = status["result"]
+                    elapsed = r.get("elapsed_seconds", 0) or 0
+                    n_valid = r.get("total_valid", 0) or 0
+                    n_eval = r.get("total_evaluated", 0) or 0
+                    best_ic = r.get("best_ic", 0) or 0
+                    mining_progress.value = 1.0
+                    mining_status.text = f"✅ 完成: 评估{n_eval}个, 发现{n_valid}个有效因子, 耗时{elapsed:.0f}s, 最佳IC={best_ic:.4f}"
+                    mining_status.style("color: #3fb950")
+                    if not _notified_mining_done["done"]:
+                        _notified_mining_done["done"] = True
+                        _mining_log(f"✅ 完成: 评估{n_eval}个, 发现{n_valid}个有效因子, 耗时{elapsed:.0f}s, 最佳IC={best_ic:.4f}")
+                        ui.notify(f"🎉 因子挖掘完成！发现{n_valid}个有效因子，最佳IC={best_ic:.4f}", type="positive", timeout=10000)
+                        _refresh_pool()
+                elif status.get("error"):
+                    _set_mining_ui_running(False)
+                    mining_status.text = f"❌ 挖掘失败: {status['error']}"
+                    mining_status.style("color: #f85149")
+                    if not _notified_mining_done["done"]:
+                        _notified_mining_done["done"] = True
+                        _mining_log(f"❌ 挖掘失败: {status['error']}")
+                        ui.notify(f"❌ 因子挖掘失败: {status['error']}", type="negative", timeout=10000)
+                    mining_progress.style("display: none;")
+
+            ui.timer(2.0, _poll_mining_status)
 
         with ui.tab_panel("train"):
             with ui.card().classes("full-width q-mb-md"):
@@ -556,6 +631,11 @@ def create_factor_page(config: ETFQuantConfig) -> None:
 
             screen_result = ui.label("").classes("text-body1 q-mb-md").style("color: #8b949e")
 
+            with ui.row().classes("items-center q-mb-sm"):
+                ui.label("筛选结果").classes("text-subtitle2").style("color: #8b949e")
+                ui.space()
+                screen_select_hint = ui.label("").classes("text-caption").style("color: #58a6ff")
+
             screen_table = ui.table(
                 columns=[
                     {"name": "name", "label": "因子名", "field": "name", "sortable": True, "align": "left", "width": "120px"},
@@ -565,18 +645,21 @@ def create_factor_page(config: ETFQuantConfig) -> None:
                 ],
                 rows=[],
                 row_key="name",
+                selection="multiple",
                 pagination={"rowsPerPage": 20, "rowsPerPageOptions": [10, 20, 50, 100]},
             ).classes("full-width").props('resizable-columns separator="cell"')
+            screen_table.on("selection", lambda e: _on_screen_select(e))
 
             ui.separator().classes("q-my-lg")
 
             with ui.card().classes("full-width q-mb-md"):
                 ui.label("第二步：模型训练").classes("text-h6 q-mb-md").style("color: #58a6ff")
-                ui.label("基于筛选后的因子训练 XGBoost 预测模型。若已执行筛选，自动使用筛选结果；否则使用内置硬编码特征。训练完成后可在回测页使用。").classes("text-body2 q-mb-md").style("color: #8b949e")
+                ui.label("基于筛选后的因子训练 XGBoost 预测模型。勾选上方筛选结果中的因子后点击'使用选中因子训练'；若未勾选，则使用全部筛选结果。").classes("text-body2 q-mb-md").style("color: #8b949e")
                 with ui.row().classes("full-width items-end"):
                     etf_count_input = ui.number(label="ETF数量", value=50, min=5, max=500).classes("q-mr-md").style("min-width: 160px")
                     predict_input = ui.number(label="预测天数", value=config.ml.predict_days, min=1, max=20).classes("q-mr-md").style("min-width: 160px")
-                    ui.button("🤖 训练模型", on_click=lambda: _train_model(), color="primary").classes("q-mr-md")
+                    ui.button("🤖 使用选中因子训练", on_click=lambda: _train_model(use_selected=True), color="primary").classes("q-mr-md")
+                    ui.button("🤖 使用全部筛选结果训练", on_click=lambda: _train_model(use_selected=False), color="secondary").classes("q-mr-md")
                 train_status = ui.label("").classes("text-body2 q-mt-sm").style("color: #8b949e")
 
             with ui.expansion("📖 模型训练参数说明", icon="help").classes("full-width q-mb-md").style("border: 1px solid #30363d; border-radius: 8px;"):
@@ -615,13 +698,19 @@ def create_factor_page(config: ETFQuantConfig) -> None:
                 ui.label("已保存模型").classes("text-h6 q-mb-md").style("color: #58a6ff")
                 model_table = ui.table(
                     columns=[
-                        {"name": "name", "label": "模型名", "field": "name", "align": "left"},
-                        {"name": "path", "label": "路径", "field": "path", "align": "left"},
-                        {"name": "size_mb", "label": "大小(MB)", "field": "size_mb"},
+                        {"name": "name", "label": "模型名", "field": "name", "align": "left", "width": "260px"},
+                        {"name": "path", "label": "存储地址", "field": "path", "align": "left", "width": "300px"},
+                        {"name": "size_mb", "label": "大小(MB)", "field": "size_mb", "align": "center", "width": "80px"},
                     ],
                     rows=[],
-                ).classes("full-width")
-                ui.button("🔄 刷新", on_click=lambda: _refresh_models()).props("flat").style("color: #58a6ff")
+                    row_key="name",
+                    selection="multiple",
+                ).classes("full-width").props('separator="cell"')
+                model_table.on("rowClick", lambda e: _preview_model(e))
+                with ui.row().classes("q-mt-sm"):
+                    ui.button("🔄 刷新", on_click=lambda: _refresh_models()).props("flat").style("color: #58a6ff")
+                    export_format = ui.select(label="导出格式", options=["json", "py", "md", "txt"], value="json").classes("q-mx-md").style("min-width: 100px")
+                    ui.button("💾 导出选中", on_click=lambda: _export_model()).props("flat").style("color: #3fb950")
 
             def _screen():
                 all_factors = svc.list_factors()
@@ -690,21 +779,38 @@ def create_factor_page(config: ETFQuantConfig) -> None:
 
                 asyncio.get_event_loop().create_task(_run())
 
-            async def _train_model():
-                latest = svc.get_latest_screen_result()
-                if not latest or not latest.get("selected_names"):
-                    train_status.text = "⚠️ 请先执行因子筛选（第一步），再训练模型。"
-                    train_status.style("color: #d29922")
-                    return
-                n_selected = len(latest["selected_names"])
-                screen_time = latest.get("created_at", "")
-                if "T" in screen_time:
-                    screen_time = screen_time.replace("T", " ")[:19]
-                train_status.text = f"⏳ 使用筛选结果({n_selected}个因子, 筛选时间{screen_time})训练中..."
+            def _on_screen_select(e):
+                selected = screen_table.selected
+                n = len(selected) if selected else 0
+                if n > 0:
+                    screen_select_hint.text = f"已选 {n} 个因子（点击'使用选中因子训练'仅用这些因子）"
+                else:
+                    screen_select_hint.text = "未选择，训练时将使用全部筛选结果"
+
+            async def _train_model(use_selected: bool = False):
+                selected_names = None
+                if use_selected:
+                    selected = screen_table.selected
+                    if selected:
+                        selected_names = [r["name"] if isinstance(r, dict) else r for r in selected]
+                    else:
+                        ui.notify("未勾选任何因子，将使用全部筛选结果训练", type="info")
+
+                if not selected_names:
+                    latest = svc.get_latest_screen_result()
+                    if not latest or not latest.get("selected_names"):
+                        train_status.text = "⚠️ 请先执行因子筛选（第一步），再训练模型。"
+                        train_status.style("color: #d29922")
+                        return
+                    selected_names = latest["selected_names"]
+
+                n_selected = len(selected_names)
+                label = f"手动选择{n_selected}个因子" if use_selected and screen_table.selected else f"筛选结果{n_selected}个因子"
+                train_status.text = f"⏳ 使用{label}训练中..."
                 train_status.style("color: #58a6ff")
                 try:
                     result = await asyncio.get_event_loop().run_in_executor(
-                        None, lambda: svc.train_model(etf_count=int(etf_count_input.value), predict_days=int(predict_input.value))
+                        None, lambda: svc.train_model(etf_count=int(etf_count_input.value), predict_days=int(predict_input.value), factor_names=selected_names)
                     )
                     if result.get("success"):
                         feat_src = result.get("feature_source", "")
@@ -723,6 +829,51 @@ def create_factor_page(config: ETFQuantConfig) -> None:
                 for m in models:
                     m["size_mb"] = f"{m['size_mb']:.2f}"
                 model_table.rows = models
+
+            def _export_model():
+                selected = model_table.selected
+                if not selected:
+                    ui.notify("请先勾选要导出的模型", type="warning")
+                    return
+                fmt = export_format.value
+                for row in selected:
+                    name = row["name"] if isinstance(row, dict) else row
+                    out_path = svc.export_model(name, fmt)
+                    if out_path:
+                        ui.notify(f"已导出: {out_path}", type="positive")
+                    else:
+                        ui.notify(f"导出失败: {name}", type="negative")
+
+            def _preview_model(e):
+                row = e.args
+                name = row.get("name", "") if isinstance(row, dict) else ""
+                if not name:
+                    return
+                detail = svc.get_model_detail(name)
+                if not detail or detail.get("error"):
+                    ui.notify(f"无法加载模型: {detail.get('error', '未知')}", type="negative")
+                    return
+                with ui.dialog() as dlg, ui.card().classes("q-pa-lg").style("min-width: 600px; max-width: 800px;"):
+                    ui.label(f"📋 {name}").classes("text-h5 q-mb-md").style("color: #58a6ff")
+                    feat_names = detail.get("feature_names", [])
+                    feat_lines = "\n".join(f"  {i}. `{fn}`" for i, fn in enumerate(feat_names, 1)) if feat_names else "  （无）"
+                    ui.markdown(f"""**模型类型**: `{detail.get('model_type', 'Unknown')}` ({detail.get('model_module', '')})
+
+**标准化器**: `{detail.get('scaler_type', 'None')}`
+
+**特征来源**: {detail.get('feature_source', '未知')}
+
+**训练集**: {detail.get('train_samples', 0)} 样本 | {detail.get('train_period', '')}
+
+**验证集**: {detail.get('val_samples', 0)} 样本 | {detail.get('val_period', '')}
+
+**特征列表** ({detail.get('feature_count', 0)}个):
+{feat_lines}
+
+**文件**: {detail.get('file_path', '')} ({detail.get('file_size_kb', 0)} KB)
+""").style("color: #c9d1d9; font-size: 13px; line-height: 1.8;")
+                    ui.button("关闭", on_click=dlg.close).classes("q-mt-md")
+                dlg.open()
 
             def _load_screen_history():
                 latest = svc.get_latest_screen_result()
@@ -759,53 +910,51 @@ def create_factor_page(config: ETFQuantConfig) -> None:
             with ui.card().classes("full-width"):
                 ui.label("盘后自动因子挖掘").classes("text-h6 q-mb-md").style("color: #58a6ff")
                 ui.markdown(
-                    "设置后，系统会在每个交易日的收盘后自动运行因子挖掘，并将结果记录到因子池中。\n\n"
-                    "- **保存并启动**：保存当前设置并立即启动调度器\n"
-                    "- **暂停**：临时暂停，不丢失设置，可随时恢复\n"
-                    "- **停止**：完全停止并关闭调度器，设置会保留，下次可重新启动"
+                    "设置后，系统会在每个交易日的收盘后自动运行因子挖掘（先更新预置因子IC，再执行UCB1搜索挖掘新因子），并将结果记录到因子池中。每天在时间窗口内只执行一次。\n\n"
+                    "- **启动**：保存设置并启动调度器\n"
+                    "- **停止**：停止调度器，设置保留，下次可重新启动"
                 ).style("color: #8b949e; font-size: 13px; line-height: 1.6;")
                 with ui.row().classes("full-width q-mt-md"):
                     sched_enabled = ui.switch(text="启用定时任务", value=config.alpha.schedule.enabled).classes("q-mr-md")
-                    start_input = ui.input(label="开始时间", value=config.alpha.schedule.start_time).classes("q-mr-md").style("min-width: 140px")
-                    end_input = ui.input(label="结束时间", value=config.alpha.schedule.end_time).classes("q-mr-md").style("min-width: 140px")
+                    start_input = ui.input(label="开始时间(HH:MM)", value=config.alpha.schedule.start_time).classes("q-mr-md").style("min-width: 160px")
+                    end_input = ui.input(label="结束时间(HH:MM)", value=config.alpha.schedule.end_time).classes("q-mr-md").style("min-width: 160px")
                 days_select = ui.select(
                     label="运行日",
-                    options=["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"],
+                    options={"Monday": "周一", "Tuesday": "周二", "Wednesday": "周三", "Thursday": "周四", "Friday": "周五"},
                     multiple=True,
                     value=config.alpha.schedule.days,
                 ).classes("full-width q-mt-md")
                 with ui.row().classes("q-mt-md"):
-                    ui.button("💾 保存并启动", on_click=lambda: _save_and_start(), color="primary")
-                    ui.button("⏸ 暂停", on_click=lambda: _pause_schedule(), color="warning")
-                    ui.button("▶ 恢复", on_click=lambda: _resume_schedule(), color="secondary")
+                    ui.button("� 启动", on_click=lambda: _save_and_start(), color="primary")
                     ui.button("⏹ 停止", on_click=lambda: _stop_schedule(), color="negative")
                 sched_status = ui.label("").classes("text-body2 q-mt-md").style("color: #8b949e")
 
             with ui.card().classes("full-width q-mt-md"):
                 ui.label("挖掘历史记录").classes("text-h6 q-mb-md").style("color: #58a6ff")
-                ui.label("每次盘后自动挖掘的结果会记录在此").classes("text-body2 q-mb-md").style("color: #8b949e")
+                ui.label("手动挖掘和定时挖掘的执行记录均在此展示").classes("text-body2 q-mb-md").style("color: #8b949e")
                 mining_table = ui.table(
                     columns=[
-                        {"name": "timestamp", "label": "执行时间", "field": "timestamp", "align": "left", "sortable": True},
-                        {"name": "total_factors", "label": "总因子数", "field": "total_factors", "align": "center"},
-                        {"name": "valid_factors", "label": "有效因子数", "field": "valid_factors", "align": "center"},
+                        {"name": "timestamp", "label": "执行时间", "field": "timestamp", "align": "left", "sortable": True, "width": "140px"},
+                        {"name": "source", "label": "来源", "field": "source", "align": "center", "width": "80px"},
+                        {"name": "strategy", "label": "策略", "field": "strategy", "align": "center", "width": "110px"},
+                        {"name": "mined_valid", "label": "挖掘有效", "field": "mined_valid", "align": "center", "width": "80px"},
+                        {"name": "elapsed", "label": "耗时(秒)", "field": "elapsed", "align": "center", "sortable": True, "width": "80px"},
+                        {"name": "best_ic", "label": "最佳IC", "field": "best_ic", "align": "center", "sortable": True, "width": "70px"},
                     ],
                     rows=[],
                     row_key="timestamp",
                     pagination={"rowsPerPage": 10},
-                ).classes("full-width")
+                ).classes("full-width").props('resizable-columns separator="cell"')
                 ui.button("🔄 刷新记录", on_click=lambda: _refresh_mining_log()).props("flat").style("color: #58a6ff")
 
             def _refresh_sched_status():
                 status = svc.get_schedule_status()
-                if status.get("running") and not status.get("paused"):
-                    sched_status.text = f"🟢 运行中 | 时间窗口: {status.get('schedule', '')} | 上次执行: {status.get('last_run', '无')}"
+                days_cn = ", ".join(status.get("days_cn", status.get("days", [])))
+                if status.get("running"):
+                    sched_status.text = f"🟢 运行中 | 时间窗口: {status.get('schedule', '')} | 运行日: {days_cn} | 上次执行: {status.get('last_run', '无')}"
                     sched_status.style("color: #3fb950")
-                elif status.get("paused"):
-                    sched_status.text = f"🟡 已暂停 | 时间窗口: {status.get('schedule', '')}"
-                    sched_status.style("color: #d29922")
                 elif status.get("enabled"):
-                    sched_status.text = f"🔵 已启用但未运行 | 时间窗口: {status.get('schedule', '')}"
+                    sched_status.text = f"🔵 已启用 | 时间窗口: {status.get('schedule', '')} | 运行日: {days_cn}"
                     sched_status.style("color: #58a6ff")
                 else:
                     sched_status.text = "⚪ 未启用"
@@ -819,35 +968,20 @@ def create_factor_page(config: ETFQuantConfig) -> None:
                 if enabled and (not start or not end):
                     ui.notify("请填写开始和结束时间", type="warning")
                     return
-                result = svc.update_schedule_config(enabled, start, end, days)
+                import re
+                time_pattern = re.compile(r"^\d{1,2}:\d{2}$")
                 if enabled:
-                    sched_status.text = f"✅ 已保存并启动调度器"
+                    if not time_pattern.match(start) or not time_pattern.match(end):
+                        ui.notify("时间格式错误，请使用 HH:MM 格式（如 18:00）", type="warning")
+                        return
+                svc.update_schedule_config(enabled, start, end, days)
+                if enabled:
+                    sched_status.text = "✅ 调度器已启动"
                     sched_status.style("color: #3fb950")
                 else:
-                    sched_status.text = f"✅ 已保存设置（未启用）"
+                    sched_status.text = "✅ 设置已保存（未启用）"
                     sched_status.style("color: #58a6ff")
                 ui.notify("设置已保存", type="positive")
-
-            def _pause_schedule():
-                status = svc.get_schedule_status()
-                if not status.get("running"):
-                    ui.notify("调度器未在运行，无法暂停", type="warning")
-                    return
-                svc.pause_schedule()
-                sched_status.text = "调度器已暂停"
-                sched_status.style("color: #d29922")
-
-            def _resume_schedule():
-                status = svc.get_schedule_status()
-                if not status.get("running"):
-                    ui.notify("调度器未在运行，请先启动", type="warning")
-                    return
-                if not status.get("paused"):
-                    ui.notify("调度器未暂停", type="warning")
-                    return
-                svc.resume_schedule()
-                sched_status.text = "调度器已恢复"
-                sched_status.style("color: #3fb950")
 
             def _stop_schedule():
                 svc.stop_schedule()
@@ -864,8 +998,11 @@ def create_factor_page(config: ETFQuantConfig) -> None:
                         ts = ts.replace("T", " ")[:19]
                     rows.append({
                         "timestamp": ts,
-                        "total_factors": log.get("total_factors", 0),
-                        "valid_factors": log.get("valid_factors", 0),
+                        "source": log.get("source", "定时任务" if log.get("preset_valid", 0) > 0 else "未知"),
+                        "strategy": log.get("strategy", ""),
+                        "mined_valid": log.get("total_valid", 0),
+                        "elapsed": f"{log.get('elapsed_seconds', 0):.0f}",
+                        "best_ic": f"{log.get('best_ic', 0):.4f}",
                     })
                 mining_table.rows = rows
 

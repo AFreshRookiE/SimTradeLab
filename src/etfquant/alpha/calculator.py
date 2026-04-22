@@ -389,18 +389,27 @@ class AlphaPool:
         return pd.DataFrame([f.to_dict() for f in self._factors])
 
     def save(self, path: str) -> None:
+        import json
         df = self.to_dataframe()
+        df["params"] = df["params"].apply(lambda p: json.dumps(p, ensure_ascii=False) if isinstance(p, dict) else str(p))
         df.to_parquet(path, index=False)
         logger.info("因子池已保存: %s (%d 个因子)", path, len(self._factors))
 
     @classmethod
     def load(cls, path: str, config: AlphaConfig) -> AlphaPool:
+        import json
         pool = cls(config)
         if not Path(path).exists():
             return pool
         df = pd.read_parquet(path)
         for _, row in df.iterrows():
-            pool._factors.append(AlphaFactor(**row.to_dict()))
+            d = row.to_dict()
+            if isinstance(d.get("params"), str):
+                try:
+                    d["params"] = json.loads(d["params"])
+                except (json.JSONDecodeError, TypeError):
+                    d["params"] = {}
+            pool._factors.append(AlphaFactor(**d))
         return pool
 
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
@@ -22,6 +23,11 @@ _MINING_LOG_FILE = "output/mining_log.json"
 
 
 class FactorService:
+    _mining_state: dict[str, Any] = {"running": False, "pct": 0, "msg": "", "result": None, "error": None}
+    _mining_lock = threading.Lock()
+    _current_miner: FactorMiner | None = None
+    _miner_lock = threading.Lock()
+
     def __init__(self, config: AlphaConfig, data_config: Any, ml_config: MLConfig | None = None) -> None:
         self._config = config
         self._data_config = data_config
@@ -62,8 +68,44 @@ class FactorService:
             json.dump(state, f, ensure_ascii=False, indent=2)
 
     def _scheduled_task(self) -> None:
-        result = self.generate_preset_factors()
-        self._record_mining(result)
+        for attempt in range(2):
+            try:
+                gen_result = self.generate_preset_factors()
+                mine_result = self.mine_factors(
+                    n_steps=2048,
+                    batch_size=64,
+                    timeout_minutes=60,
+                    max_factors=50,
+                    strategy="UCB1搜索",
+                )
+                combined = {
+                    "total": gen_result.get("total", 0) + mine_result.get("total_evaluated", 0),
+                    "valid": gen_result.get("valid", 0) + mine_result.get("total_valid", 0),
+                    "total_evaluated": mine_result.get("total_evaluated", 0),
+                    "total_valid": mine_result.get("total_valid", 0),
+                    "total_skipped": mine_result.get("total_skipped", 0),
+                    "elapsed_seconds": mine_result.get("elapsed_seconds", 0),
+                    "best_ic": mine_result.get("best_ic", 0),
+                    "best_expression": mine_result.get("best_expression", ""),
+                    "preset_total": gen_result.get("total", 0),
+                    "preset_valid": gen_result.get("valid", 0),
+                    "source": "定时任务",
+                }
+                self._record_mining(combined)
+                return
+            except Exception as exc:
+                if attempt == 0:
+                    logger.warning("定时任务执行失败，10秒后重试: %s", exc)
+                    import time
+                    time.sleep(10)
+                else:
+                    logger.error("定时任务重试仍失败: %s", exc)
+                    self._record_mining({
+                        "total": 0, "valid": 0,
+                        "total_evaluated": 0, "total_valid": 0, "total_skipped": 0,
+                        "elapsed_seconds": 0, "best_ic": 0, "best_expression": "",
+                        "preset_total": 0, "preset_valid": 0,
+                    })
 
     def _record_mining(self, result: dict[str, Any]) -> None:
         log_path = Path(_MINING_LOG_FILE)
@@ -79,7 +121,18 @@ class FactorService:
             "timestamp": datetime.now().isoformat(),
             "total_factors": result.get("total", 0),
             "valid_factors": result.get("valid", 0),
-            "factors": result.get("factors", []),
+            "total_evaluated": result.get("total_evaluated", 0),
+            "total_valid": result.get("total_valid", 0),
+            "total_skipped": result.get("total_skipped", 0),
+            "elapsed_seconds": round(result.get("elapsed_seconds", 0), 1),
+            "best_ic": round(result.get("best_ic", 0), 4),
+            "best_expression": result.get("best_expression", ""),
+            "preset_total": result.get("preset_total", 0),
+            "preset_valid": result.get("preset_valid", 0),
+            "source": result.get("source", "未知"),
+            "strategy": result.get("strategy", ""),
+            "n_steps": result.get("n_steps", 0),
+            "batch_size": result.get("batch_size", 0),
         }
         logs.append(entry)
         if len(logs) > 100:
@@ -195,6 +248,31 @@ class FactorService:
                      max_etf_for_ic: int | None = None,
                      max_etf_for_mutual_ic: int | None = None,
                      progress_callback: Callable | None = None) -> dict[str, Any]:
+        with self._mining_lock:
+            if self._mining_state.get("running"):
+                return {"error": "挖掘任务正在执行中，请等待完成"}
+            self._mining_state = {
+                "running": True,
+                "pct": 0,
+                "msg": "准备中...",
+                "start_time": datetime.now().isoformat(),
+                "params": {
+                    "n_steps": n_steps, "batch_size": batch_size,
+                    "timeout_minutes": timeout_minutes, "max_factors": max_factors,
+                    "strategy": strategy,
+                },
+                "result": None,
+                "error": None,
+            }
+
+        def _wrapped_progress(current, total, msg, info):
+            pct = info.get("pct", 0)
+            with self._mining_lock:
+                self._mining_state["pct"] = pct
+                self._mining_state["msg"] = msg
+            if progress_callback:
+                progress_callback(current, total, msg, info)
+
         mining_cfg = MiningConfig(
             n_steps=n_steps,
             batch_size=batch_size,
@@ -224,29 +302,91 @@ class FactorService:
                      strategy, n_steps, batch_size, timeout_minutes, max_factors)
         bridge = DataBridge(self._data_config)
         calculator = ETFAlphaCalculator(bridge, alpha_cfg)
-        miner = FactorMiner(calculator, mining_cfg)
-        mining_result = miner.mine(progress_callback=progress_callback)
-        for f_dict in mining_result.discovered:
+        existing_factors = []
+        if strategy == "因子组合搜索":
+            existing_factors = self.list_factors(valid_only=True)
+        miner = FactorMiner(calculator, mining_cfg, existing_factors=existing_factors)
+        with self._miner_lock:
+            self._current_miner = miner
+
+        def _on_discover(factor_dict: dict[str, Any]) -> None:
             factor = AlphaFactor(
-                name=f_dict["name"],
-                expression=f_dict["expression"],
-                description=f_dict.get("description", ""),
-                ic=f_dict["ic"],
-                rank_ic=f_dict["rank_ic"],
-                icir=f_dict["icir"],
-                is_valid=f_dict["is_valid"],
-                category=f_dict.get("category", "custom"),
+                name=factor_dict["name"],
+                expression=factor_dict["expression"],
+                description=factor_dict.get("description", ""),
+                ic=factor_dict["ic"],
+                rank_ic=factor_dict["rank_ic"],
+                icir=factor_dict["icir"],
+                is_valid=factor_dict["is_valid"],
+                category=factor_dict.get("category", "custom"),
             )
             self._store.upsert(factor)
-        return {
-            "total_evaluated": mining_result.total_evaluated,
-            "total_valid": mining_result.total_valid,
-            "total_skipped": mining_result.total_skipped,
-            "elapsed_seconds": mining_result.elapsed_seconds,
-            "best_ic": mining_result.best_ic,
-            "best_expression": mining_result.best_expression,
-            "factors": mining_result.discovered,
-        }
+            logger.debug("增量保存因子: %s (IC=%.4f)", factor.name, factor.ic)
+
+        try:
+            mining_result = miner.mine(progress_callback=_wrapped_progress, on_discover=_on_discover)
+            for f_dict in mining_result.discovered:
+                factor = AlphaFactor(
+                    name=f_dict["name"],
+                    expression=f_dict["expression"],
+                    description=f_dict.get("description", ""),
+                    ic=f_dict["ic"],
+                    rank_ic=f_dict["rank_ic"],
+                    icir=f_dict["icir"],
+                    is_valid=f_dict["is_valid"],
+                    category=f_dict.get("category", "custom"),
+                )
+                self._store.upsert(factor)
+            result = {
+                "total_evaluated": mining_result.total_evaluated,
+                "total_valid": mining_result.total_valid,
+                "total_skipped": mining_result.total_skipped,
+                "elapsed_seconds": mining_result.elapsed_seconds,
+                "best_ic": mining_result.best_ic,
+                "best_expression": mining_result.best_expression,
+                "factors": mining_result.discovered,
+            }
+            with self._mining_lock:
+                self._mining_state["running"] = False
+                self._mining_state["pct"] = 100
+                self._mining_state["result"] = result
+            with self._miner_lock:
+                self._current_miner = None
+            self._record_mining({
+                "total": mining_result.total_evaluated,
+                "valid": mining_result.total_valid,
+                "total_evaluated": mining_result.total_evaluated,
+                "total_valid": mining_result.total_valid,
+                "total_skipped": mining_result.total_skipped,
+                "elapsed_seconds": mining_result.elapsed_seconds,
+                "best_ic": mining_result.best_ic,
+                "best_expression": mining_result.best_expression,
+                "preset_total": 0,
+                "preset_valid": 0,
+                "source": "手动挖掘",
+                "strategy": strategy,
+                "n_steps": n_steps,
+                "batch_size": batch_size,
+            })
+            return result
+        except Exception as e:
+            with self._mining_lock:
+                self._mining_state["running"] = False
+                self._mining_state["error"] = str(e)
+            with self._miner_lock:
+                self._current_miner = None
+            raise
+
+    def stop_mining(self) -> dict[str, str]:
+        with self._miner_lock:
+            if self._current_miner is not None:
+                self._current_miner.cancel()
+                return {"status": "cancelling"}
+        return {"status": "no_task"}
+
+    def get_mining_status(self) -> dict[str, Any]:
+        with self._mining_lock:
+            return dict(self._mining_state)
 
     def get_schedule_status(self) -> dict[str, Any]:
         if self._scheduler:
@@ -331,7 +471,7 @@ class FactorService:
         df.to_parquet(save_path, index=False)
         return save_path
 
-    def train_model(self, etf_codes: list[str] | None = None, etf_count: int = 100, predict_days: int | None = None) -> dict[str, Any]:
+    def train_model(self, etf_codes: list[str] | None = None, etf_count: int = 100, predict_days: int | None = None, factor_names: list[str] | None = None) -> dict[str, Any]:
         from etfquant.ml.trainer import ETFDataSource, FeatureEngineer, ModelTrainer
 
         if not self._ml_config:
@@ -343,7 +483,18 @@ class FactorService:
         bridge = DataBridge(self._data_config)
         ds = ETFDataSource(bridge, self._ml_config)
 
-        factor_exprs = self._store.get_selected_factor_expressions()
+        factor_exprs = []
+        if factor_names:
+            with self._store._lock:
+                placeholders = ",".join("?" for _ in factor_names)
+                rows = self._store._conn.execute(
+                    f"SELECT name, expression, ic, rank_ic, icir FROM factors WHERE name IN ({placeholders})",
+                    factor_names,
+                ).fetchall()
+                factor_exprs = [{"name": r["name"], "expression": r["expression"], "ic": r["ic"], "rank_ic": r["rank_ic"], "icir": r["icir"]} for r in rows]
+            logger.info("使用手动选择因子训练: %d 个", len(factor_exprs))
+        if not factor_exprs:
+            factor_exprs = self._store.get_selected_factor_expressions()
         if factor_exprs:
             logger.info("使用筛选因子训练: %d 个因子表达式", len(factor_exprs))
         else:
@@ -359,7 +510,7 @@ class FactorService:
             return {"success": False, "error": "训练数据为空，请检查数据或减少ETF数量"}
 
         trainer = ModelTrainer(self._ml_config)
-        model_pkg = trainer.train(X, y, dates)
+        model_pkg = trainer.train(X, y, dates, factor_expressions=factor_exprs if factor_exprs else None)
 
         from datetime import datetime
 
@@ -398,6 +549,147 @@ class FactorService:
                 "modified": f.stat().st_mtime,
             })
         return models
+
+    def export_model(self, model_name: str, fmt: str = "json") -> str:
+        from etfquant.ml.trainer import ModelPackage
+        if not self._ml_config:
+            return ""
+        model_dir = Path(self._ml_config.save_path)
+        ptp_path = model_dir / f"{model_name}.ptp"
+        if not ptp_path.exists():
+            return ""
+        pkg = ModelPackage.load(str(ptp_path))
+        meta = pkg.metadata or {}
+        feat_names = pkg.feature_names or []
+        export_dir = model_dir / "exports"
+        export_dir.mkdir(parents=True, exist_ok=True)
+
+        if fmt == "json":
+            import json as json_mod
+            export_data = {
+                "model_name": model_name,
+                "feature_names": feat_names,
+                "feature_count": meta.get("feature_count", 0),
+                "train_samples": meta.get("train_samples", 0),
+                "val_samples": meta.get("val_samples", 0),
+                "train_period": meta.get("train_period", ""),
+                "val_period": meta.get("val_period", ""),
+                "feature_source": meta.get("feature_source", ""),
+                "model_type": type(pkg.model).__name__ if pkg.model else "",
+            }
+            out_path = export_dir / f"{model_name}.json"
+            with open(out_path, "w", encoding="utf-8") as f:
+                json_mod.dump(export_data, f, ensure_ascii=False, indent=2)
+
+        elif fmt == "py":
+            feat_str = repr(feat_names)
+            model_type = type(pkg.model).__name__ if pkg.model else "Unknown"
+            py_code = f'''import pickle
+import pandas as pd
+import numpy as np
+
+def load_model(path="{model_name}.ptp"):
+    with open(path, "rb") as f:
+        data = pickle.load(f)
+    return data
+
+def predict(model_data, features_df):
+    model = model_data["model"]
+    scaler = model_data.get("scaler")
+    feature_names = model_data.get("feature_names", [])
+    X = features_df[feature_names] if feature_names else features_df
+    if scaler is not None:
+        X = scaler.transform(X)
+    return model.predict(X)
+
+# Model: {model_name}
+# Type: {model_type}
+# Features: {feat_str}
+# Train samples: {meta.get("train_samples", 0)}
+# Val samples: {meta.get("val_samples", 0)}
+# Train period: {meta.get("train_period", "")}
+# Val period: {meta.get("val_period", "")}
+'''
+            out_path = export_dir / f"{model_name}.py"
+            with open(out_path, "w", encoding="utf-8") as f:
+                f.write(py_code)
+
+        elif fmt == "md":
+            md_content = f'''# {model_name}
+
+## Model Info
+- **Type**: {type(pkg.model).__name__ if pkg.model else "Unknown"}
+- **Feature Source**: {meta.get("feature_source", "")}
+- **Train Samples**: {meta.get("train_samples", 0)}
+- **Val Samples**: {meta.get("val_samples", 0)}
+- **Train Period**: {meta.get("train_period", "")}
+- **Val Period**: {meta.get("val_period", "")}
+
+## Features ({len(feat_names)})
+| # | Feature Name |
+|---|-------------|
+'''
+            for i, fn in enumerate(feat_names, 1):
+                md_content += f"| {i} | `{fn}` |\n"
+            out_path = export_dir / f"{model_name}.md"
+            with open(out_path, "w", encoding="utf-8") as f:
+                f.write(md_content)
+
+        elif fmt == "txt":
+            lines = [
+                f"Model: {model_name}",
+                f"Type: {type(pkg.model).__name__ if pkg.model else 'Unknown'}",
+                f"Feature Source: {meta.get('feature_source', '')}",
+                f"Train Samples: {meta.get('train_samples', 0)}",
+                f"Val Samples: {meta.get('val_samples', 0)}",
+                f"Train Period: {meta.get('train_period', '')}",
+                f"Val Period: {meta.get('val_period', '')}",
+                f"Features ({len(feat_names)}):",
+            ]
+            for i, fn in enumerate(feat_names, 1):
+                lines.append(f"  {i}. {fn}")
+            out_path = export_dir / f"{model_name}.txt"
+            with open(out_path, "w", encoding="utf-8") as f:
+                f.write("\n".join(lines))
+
+        else:
+            return ""
+
+        return str(out_path)
+
+    def get_model_detail(self, model_name: str) -> dict[str, Any]:
+        from etfquant.ml.trainer import ModelPackage
+        if not self._ml_config:
+            return {}
+        model_dir = Path(self._ml_config.save_path)
+        ptp_path = model_dir / f"{model_name}.ptp"
+        if not ptp_path.exists():
+            return {}
+        try:
+            pkg = ModelPackage.load(str(ptp_path))
+        except Exception as e:
+            return {"error": str(e)}
+        meta = pkg.metadata or {}
+        feat_names = pkg.feature_names or []
+        model_type = type(pkg.model).__name__ if pkg.model else "Unknown"
+        model_module = type(pkg.model).__module__ if pkg.model else ""
+        scaler_type = type(pkg.scaler).__name__ if pkg.scaler else "None"
+        return {
+            "model_name": model_name,
+            "model_type": model_type,
+            "model_module": model_module,
+            "scaler_type": scaler_type,
+            "feature_count": meta.get("feature_count", len(feat_names)),
+            "feature_names": feat_names,
+            "train_samples": meta.get("train_samples", 0),
+            "val_samples": meta.get("val_samples", 0),
+            "train_period": meta.get("train_period", ""),
+            "val_period": meta.get("val_period", ""),
+            "feature_source": meta.get("feature_source", ""),
+            "file_size_kb": round(ptp_path.stat().st_size / 1024, 1),
+            "file_path": str(ptp_path),
+            "model_params": meta.get("model_params", {}),
+        }
 
     def close(self) -> None:
         if self._scheduler:
