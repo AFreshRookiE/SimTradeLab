@@ -12,6 +12,16 @@ from etfquant.api.strategy import StrategyService
 from etfquant.ui.charts import render_drawdown_chart, render_metrics, render_nav_chart, render_trades_table
 
 
+_STRATEGY_LABELS = {
+    "ma_cross": "MA均线交叉",
+    "momentum": "动量策略",
+    "mean_reversion": "均值回归",
+    "etf_premium": "ETF折溢价套利",
+    "ml_model": "ML模型策略",
+    "custom": "自定义策略",
+}
+
+
 def _prev_trading_day() -> str:
     today = date.today()
     if today.weekday() == 5:
@@ -180,6 +190,8 @@ def create_backtest_page(config: ETFQuantConfig, shared_state: dict[str, Any] | 
     pipeline_stages_row = ui.row().classes("q-mb-md q-gutter-xs")
     result_container = ui.column().classes("full-width")
 
+    top5_container = ui.column().classes("full-width")
+
     def _on_strategy_change():
         is_custom = strategy_select.value == "custom"
         is_ml = strategy_select.value == "ml_model"
@@ -195,6 +207,91 @@ def create_backtest_page(config: ETFQuantConfig, shared_state: dict[str, Any] | 
         if not val:
             return ""
         return val.split()[0] if " " in val else val
+
+    def _get_strategy_label(st: str) -> str:
+        return _STRATEGY_LABELS.get(st, st)
+
+    def _render_last_backtest():
+        latest = svc.get_latest_backtest()
+        if not latest:
+            return
+        result_container.clear()
+        with result_container:
+            with ui.card().classes("full-width q-mb-md"):
+                ts = latest.get("timestamp", "")
+                if "T" in ts:
+                    ts = ts.replace("T", " ")[:19]
+                ui.label(f"📋 上次回测结果 ({ts})").classes("text-subtitle1 q-mb-sm").style("color: #58a6ff")
+                code = latest.get("code", "")
+                st = latest.get("strategy_type", "")
+                ui.label(f"ETF: {code} | 策略: {_get_strategy_label(st)} | 年化{latest.get('annual_return', 0):.2%} | 夏普{latest.get('sharpe_ratio', 0):.4f} | 回撤{latest.get('max_drawdown', 0):.2%}").style("color: #8b949e; font-size: 13px;")
+                ui.label("💡 点击「运行回测」可查看完整图表和交易明细").style("color: #8b949e; font-size: 12px;")
+
+    def _render_last_top5():
+        top5_data = svc.get_top5_result()
+        if not top5_data or not top5_data.get("top5"):
+            return
+        top5 = top5_data["top5"]
+        ts = top5_data.get("timestamp", "")
+        if "T" in ts:
+            ts = ts.replace("T", " ")[:19]
+        st = top5_data.get("strategy_type", "")
+        params = top5_data.get("strategy_params", {})
+
+        from etfquant.data.bridge import DataBridge
+        bridge = DataBridge(config.data)
+        names = bridge.get_etf_names()
+
+        top5_container.clear()
+        with top5_container:
+            with ui.card().classes("full-width q-mb-md"):
+                ui.label(f"🏆 上次全市场Top5 ({ts})").classes("text-subtitle1 q-mb-sm").style("color: #58a6ff")
+                ui.label(f"策略: {_get_strategy_label(st)} | 参数: {params}").style("color: #8b949e; font-size: 13px;")
+                rows = []
+                for i, r in enumerate(top5):
+                    code = r.get("code", "")
+                    name = names.get(code, "")
+                    rows.append({
+                        "rank": i + 1,
+                        "code": f"{code} {name}" if name else code,
+                        "strategy": _get_strategy_label(st),
+                        "annual_return": f"{r.get('annual_return', 0):.2%}",
+                        "sharpe_ratio": f"{r.get('sharpe_ratio', 0):.4f}",
+                        "max_drawdown": f"{r.get('max_drawdown', 0):.2%}",
+                        "win_rate": f"{r.get('win_rate', 0):.2%}",
+                        "total_trades": r.get("total_trades", 0),
+                        "calmar_ratio": f"{r.get('calmar_ratio', 0):.4f}",
+                    })
+                ui.table(
+                    columns=[
+                        {"name": "rank", "label": "排名", "field": "rank", "align": "center", "width": "60px"},
+                        {"name": "code", "label": "ETF", "field": "code", "align": "left", "sortable": True, "width": "160px"},
+                        {"name": "strategy", "label": "策略", "field": "strategy", "align": "center", "width": "110px"},
+                        {"name": "annual_return", "label": "年化收益", "field": "annual_return", "align": "right", "sortable": True, "width": "100px"},
+                        {"name": "sharpe_ratio", "label": "夏普比率", "field": "sharpe_ratio", "align": "right", "sortable": True, "width": "100px"},
+                        {"name": "max_drawdown", "label": "最大回撤", "field": "max_drawdown", "align": "right", "sortable": True, "width": "100px"},
+                        {"name": "win_rate", "label": "胜率", "field": "win_rate", "align": "right", "width": "80px"},
+                        {"name": "total_trades", "label": "交易次数", "field": "total_trades", "align": "center", "width": "80px"},
+                        {"name": "calmar_ratio", "label": "卡尔玛比率", "field": "calmar_ratio", "align": "right", "width": "100px"},
+                    ],
+                    rows=rows,
+                    row_key="rank",
+                ).classes("full-width").props('separator="cell"')
+                with ui.expansion("💡 实盘操作建议", icon="lightbulb").classes("full-width q-mt-md").style("border: 1px solid #30363d; border-radius: 8px;"):
+                    best = top5[0] if top5 else {}
+                    best_code = best.get("code", "")
+                    best_name = names.get(best_code, "")
+                    ui.markdown(f"""
+**基于回测结果的实盘操作建议：**
+
+1. **优先关注Top1 ETF** ({best_code} {best_name})：夏普比率 {best.get('sharpe_ratio', 0):.4f}，年化收益 {best.get('annual_return', 0):.2%}
+2. **分散配置**：建议从Top3中各选1支，等权配置降低单一标的风险
+3. **关注回撤**：最大回撤超过20%的标的需谨慎，建议设置止损线
+4. **交易频率**：交易次数过少（<5次）的策略可能缺乏统计显著性
+5. **模型时效**：ML模型策略需定期重新训练，建议每周更新因子和模型
+
+**风险提示**：回测收益不代表未来表现，实盘需考虑滑点、流动性、冲击成本等因素。
+""").style("color: #c9d1d9; font-size: 13px; line-height: 1.6;")
 
     async def _run():
         code = _extract_code(str(code_input.value)).strip()
@@ -341,12 +438,18 @@ def create_backtest_page(config: ETFQuantConfig, shared_state: dict[str, Any] | 
         run_status.text = "⏳ 正在扫描全市场ETF..."
         run_status.style("color: #58a6ff")
 
+        scan_state = {"done": False, "total": 0, "scanned": 0, "top5": [], "error": None}
+
         def _scan_all():
             from etfquant.data.bridge import DataBridge
             bridge = DataBridge(config.data)
             etf_list = bridge.list_etf_codes()
+            scan_state["total"] = len(etf_list)
             results = []
-            for i, code in enumerate(etf_list[:200]):
+            for i, code in enumerate(etf_list):
+                if scan_state.get("cancel"):
+                    break
+                scan_state["scanned"] = i + 1
                 try:
                     r = svc.run_backtest(
                         code=code,
@@ -377,56 +480,47 @@ def create_backtest_page(config: ETFQuantConfig, shared_state: dict[str, Any] | 
                 except Exception:
                     pass
             results.sort(key=lambda x: x["sharpe_ratio"], reverse=True)
-            return results[:5]
+            scan_state["top5"] = results[:5]
+            scan_state["done"] = True
 
-        try:
-            top5 = await asyncio.get_event_loop().run_in_executor(None, _scan_all)
-            progress.value = 1.0
-            if not top5:
-                run_status.text = "⚠️ 未找到有效回测结果（可能策略未产生交易信号）"
-                run_status.style("color: #d29922")
-                return
-            run_status.text = f"✅ 扫描完成，找到 {len(top5)} 个表现优秀的ETF"
-            run_status.style("color: #3fb950")
-            result_container.clear()
-            with result_container:
-                with ui.card().classes("full-width q-mb-md"):
-                    ui.label("🏆 全市场回测Top5 ETF").classes("text-h6 q-mb-md").style("color: #58a6ff")
-                    ui.markdown("基于所选策略在全市场ETF中回测，按夏普比率排序取前5名。这些ETF与当前策略最匹配，可作为实盘候选标的。").style("color: #8b949e; font-size: 13px;")
-                    ui.table(
-                        columns=[
-                            {"name": "rank", "label": "排名", "field": "rank", "align": "center", "width": "60px"},
-                            {"name": "code", "label": "ETF代码", "field": "code", "align": "left", "sortable": True, "width": "100px"},
-                            {"name": "annual_return", "label": "年化收益", "field": "annual_return", "align": "right", "sortable": True, "width": "100px"},
-                            {"name": "sharpe_ratio", "label": "夏普比率", "field": "sharpe_ratio", "align": "right", "sortable": True, "width": "100px"},
-                            {"name": "max_drawdown", "label": "最大回撤", "field": "max_drawdown", "align": "right", "sortable": True, "width": "100px"},
-                            {"name": "win_rate", "label": "胜率", "field": "win_rate", "align": "right", "width": "80px"},
-                            {"name": "total_trades", "label": "交易次数", "field": "total_trades", "align": "center", "width": "80px"},
-                            {"name": "calmar_ratio", "label": "卡尔玛比率", "field": "calmar_ratio", "align": "right", "width": "100px"},
-                        ],
-                        rows=[{**r, "rank": i + 1, "annual_return": f"{r['annual_return']:.2%}", "sharpe_ratio": f"{r['sharpe_ratio']:.4f}", "max_drawdown": f"{r['max_drawdown']:.2%}", "win_rate": f"{r['win_rate']:.2%}", "calmar_ratio": f"{r['calmar_ratio']:.4f}"} for i, r in enumerate(top5)],
-                        row_key="code",
-                    ).classes("full-width").props('separator="cell"')
-                    with ui.expansion("💡 实盘操作建议", icon="lightbulb").classes("full-width q-mt-md").style("border: 1px solid #30363d; border-radius: 8px;"):
-                        best = top5[0] if top5 else {}
-                        ui.markdown(f"""
-**基于回测结果的实盘操作建议：**
+        asyncio.get_event_loop().run_in_executor(None, _scan_all)
 
-1. **优先关注Top1 ETF** ({best.get('code', '')})：夏普比率 {best.get('sharpe_ratio', 0):.4f}，年化收益 {best.get('annual_return', 0):.2%}
-2. **分散配置**：建议从Top3中各选1支，等权配置降低单一标的风险
-3. **关注回撤**：最大回撤超过20%的标的需谨慎，建议设置止损线
-4. **交易频率**：交易次数过少（<5次）的策略可能缺乏统计显著性
-5. **模型时效**：ML模型策略需定期重新训练，建议每周更新因子和模型
+        def _poll_scan():
+            if scan_state["done"]:
+                scan_timer.active = False
+                progress.value = 1.0
+                top5 = scan_state["top5"]
+                if not top5:
+                    run_status.text = "⚠️ 未找到有效回测结果（可能策略未产生交易信号）"
+                    run_status.style("color: #d29922")
+                    return
+                run_status.text = f"✅ 扫描完成，共扫描{scan_state['scanned']}只ETF，找到 {len(top5)} 个表现优秀的ETF"
+                run_status.style("color: #3fb950")
 
-**风险提示**：回测收益不代表未来表现，实盘需考虑滑点、流动性、冲击成本等因素。
-""").style("color: #c9d1d9; font-size: 13px; line-height: 1.6;")
-        except Exception as e:
-            progress.value = 0
-            run_status.text = f"❌ 异常: {e}"
-            run_status.style("color: #f85149")
+                strategy_params = {
+                    "ma_short": int(ma_short_input.value),
+                    "ma_long": int(ma_long_input.value),
+                    "momentum_lookback": int(momentum_lookback.value),
+                }
+                svc.save_top5_result(top5, strategy, strategy_params)
+
+                _render_last_top5()
+            else:
+                total = scan_state["total"]
+                scanned = scan_state["scanned"]
+                if total > 0:
+                    pct = scanned / total
+                    progress.value = pct
+                    run_status.text = f"⏳ 扫描中: {scanned}/{total} ETF ({pct:.0%})..."
+                    run_status.style("color: #58a6ff")
+
+        scan_timer = ui.timer(1.0, _poll_scan)
 
     def _export_csv():
         from pathlib import Path
         path = str(Path(config.backtest.save_path) / "backtest_result.csv")
         svc.export_result(path)
         ui.notify(f"已导出: {path}", type="positive")
+
+    _render_last_backtest()
+    _render_last_top5()

@@ -211,6 +211,7 @@ def create_factor_page(config: ETFQuantConfig) -> None:
                 ui.button("🗑 清空无效", on_click=lambda: _clear_invalid()).props("flat").style("color: #f85149").on("mouseover", lambda: ui.tooltip("删除有效性为❌的因子，不可恢复！"))
                 ui.button("🔄 重新校验", on_click=lambda: _revalidate()).props("flat").style("color: #58a6ff").on("mouseover", lambda: ui.tooltip("按当前IC/ICIR阈值重新判定所有因子的有效性"))
                 ui.button("🗑 删除选中", on_click=lambda: _delete_selected()).props("flat").style("color: #f85149").on("mouseover", lambda: ui.tooltip("删除勾选的因子，不可恢复！"))
+                ui.button("🧹 清空同质", on_click=lambda: _find_redundant()).props("flat").style("color: #d29922").on("mouseover", lambda: ui.tooltip("找出因子值高度相关(>0.95)的冗余因子，每组保留IC最高的一个"))
                 ui.space()
                 pool_count_label = ui.label("").classes("text-caption").style("color: #8b949e")
 
@@ -223,7 +224,6 @@ def create_factor_page(config: ETFQuantConfig) -> None:
                     {"name": "is_valid", "label": "有效性", "field": "is_valid", "align": "center", "width": "60px"},
                     {"name": "category_label", "label": "分类", "field": "category_label", "sortable": True, "align": "center", "width": "80px"},
                     {"name": "updated_at", "label": "更新时间", "field": "updated_at", "sortable": True, "align": "center", "width": "140px"},
-                    {"name": "detail", "label": "详情", "field": "detail", "align": "center", "width": "60px"},
                 ],
                 rows=[],
                 row_key="name",
@@ -288,7 +288,6 @@ def create_factor_page(config: ETFQuantConfig) -> None:
                     if "T" in ts:
                         ts = ts.replace("T", " ")[:19]
                     r["updated_at"] = ts
-                    r["detail"] = "🔍"
                 factor_table.rows = rows
                 valid_count = sum(1 for r in rows if r["is_valid"] == "✅")
                 pool_count_label.text = f"共 {len(rows)} 个因子，{valid_count} 个有效"
@@ -323,6 +322,63 @@ def create_factor_page(config: ETFQuantConfig) -> None:
                     icir_threshold=icir_input.value,
                 )
                 ui.notify(f"校验完成: {result['total']}个因子中{result['updated']}个有效性变更", type="positive")
+                _refresh_pool()
+
+            _redundant_result = {"groups": None, "computing": False}
+
+            def _find_redundant():
+                if _redundant_result["computing"]:
+                    ui.notify("正在计算中，请稍候...", type="warning")
+                    return
+                _redundant_result["computing"] = True
+                _redundant_result["groups"] = None
+                ui.notify("正在计算因子间相关性，请稍候...", type="info")
+
+                def _compute():
+                    try:
+                        groups = svc.find_redundant_factors(corr_threshold=0.95)
+                        _redundant_result["groups"] = groups
+                    except Exception as e:
+                        _redundant_result["groups"] = {"error": str(e)}
+                    finally:
+                        _redundant_result["computing"] = False
+
+                import asyncio
+                asyncio.get_event_loop().run_in_executor(None, _compute)
+
+            def _poll_redundant():
+                if _redundant_result["computing"]:
+                    return
+                groups = _redundant_result["groups"]
+                if groups is None:
+                    return
+                _redundant_result["groups"] = None
+                if isinstance(groups, dict) and "error" in groups:
+                    ui.notify(f"计算失败: {groups['error']}", type="negative")
+                    return
+                if not groups:
+                    ui.notify("未发现同质因子，因子池多样性良好！", type="positive")
+                    return
+                total_remove = sum(g["remove_count"] for g in groups)
+                with ui.dialog() as dialog, ui.card().style("min-width: 500px; max-height: 70vh;"):
+                    ui.label(f"发现 {len(groups)} 组同质因子，共 {total_remove} 个冗余").classes("text-h6 q-mb-sm").style("color: #d29922")
+                    ui.label("每组保留IC最高的因子，删除其余冗余因子").classes("text-body2 q-mb-md").style("color: #8b949e")
+                    with ui.scroll_area().style("max-height: 400px;"):
+                        for i, g in enumerate(groups):
+                            with ui.expansion(f"第{i+1}组: 保留 {g['keep']} (IC={g['keep_ic']:.4f}), 删除 {g['remove_count']}个", icon="group_work").classes("full-width q-mb-xs").style("border: 1px solid #30363d; border-radius: 4px;"):
+                                for name in g["remove"]:
+                                    ui.label(f"  🗑 {name}").style("color: #f85149; font-size: 12px;")
+                                ui.label(f"  组内最大相关系数: {g['max_corr']:.4f}").style("color: #8b949e; font-size: 12px;")
+                    with ui.row().classes("q-mt-md"):
+                        ui.button("取消", on_click=dialog.close).props("flat")
+                        ui.button(f"确认删除 {total_remove} 个冗余因子", on_click=lambda: [_do_remove_redundant(groups), dialog.close()], color="negative")
+                dialog.open()
+
+            ui.timer(1.0, _poll_redundant)
+
+            def _do_remove_redundant(groups):
+                removed = svc.remove_redundant_factors(groups)
+                ui.notify(f"已删除 {removed} 个冗余因子", type="positive")
                 _refresh_pool()
 
             _refresh_pool()
@@ -578,8 +634,12 @@ def create_factor_page(config: ETFQuantConfig) -> None:
                     n_eval = r.get("total_evaluated", 0) or 0
                     best_ic = r.get("best_ic", 0) or 0
                     mining_progress.value = 1.0
-                    mining_status.text = f"✅ 完成: 评估{n_eval}个, 发现{n_valid}个有效因子, 耗时{elapsed:.0f}s, 最佳IC={best_ic:.4f}"
-                    mining_status.style("color: #3fb950")
+                    if r.get("cancelled"):
+                        mining_status.text = f"⏹ 已停止: 评估{n_eval}个, 发现{n_valid}个有效因子, 耗时{elapsed:.0f}s, 最佳IC={best_ic:.4f}"
+                        mining_status.style("color: #d29922")
+                    else:
+                        mining_status.text = f"✅ 完成: 评估{n_eval}个, 发现{n_valid}个有效因子, 耗时{elapsed:.0f}s, 最佳IC={best_ic:.4f}"
+                        mining_status.style("color: #3fb950")
                     if not _notified_mining_done["done"]:
                         _notified_mining_done["done"] = True
                         _mining_log(f"✅ 完成: 评估{n_eval}个, 发现{n_valid}个有效因子, 耗时{elapsed:.0f}s, 最佳IC={best_ic:.4f}")

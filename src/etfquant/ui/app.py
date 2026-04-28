@@ -85,7 +85,7 @@ def _create_nav(config: ETFQuantConfig) -> None:
                 ui.button(f"{icon} {label}", on_click=lambda p=path: ui.navigate.to(p)).classes("nav-btn").props("flat dense no-caps").style("min-width: 100px; justify-content: center;")
 
     with ui.footer().classes("text-center q-py-xs").style("height: 28px"):
-        ui.label("ETFQuantDesk v0.2.0 | ETF Data → Alpha → ML → Backtest").classes("text-caption text-grey-7")
+        ui.label("ETFQuantDesk v0.3.0 | ETF Data → Alpha → ML → Backtest").classes("text-caption text-grey-7")
 
 
 def main() -> None:

@@ -15,6 +15,7 @@ __all__ = ["BacktestService"]
 logger = get_logger("etfquant.api.backtest")
 
 _BACKTEST_HISTORY_FILE = "output/backtest/backtest_history.json"
+_TOP5_RESULT_FILE = "output/backtest/top5_result.json"
 
 _STRATEGY_DESC: dict[str, str] = {
     "ma_cross": "双均线交叉策略：短期均线上穿长期均线买入，下穿卖出",
@@ -330,3 +331,37 @@ class BacktestService:
         except Exception:
             return []
         return [h for h in history if h.get("id") in entry_ids]
+
+    def get_latest_backtest(self) -> dict[str, Any] | None:
+        history_path = Path(_BACKTEST_HISTORY_FILE)
+        if not history_path.exists():
+            return None
+        try:
+            with open(history_path, "r", encoding="utf-8") as f:
+                history = json.load(f)
+            return history[-1] if history else None
+        except Exception:
+            return None
+
+    def save_top5_result(self, top5: list[dict[str, Any]], strategy_type: str, strategy_params: dict[str, Any] | None = None) -> None:
+        top5_path = Path(_TOP5_RESULT_FILE)
+        top5_path.parent.mkdir(parents=True, exist_ok=True)
+        data = {
+            "timestamp": datetime.now().isoformat(),
+            "strategy_type": strategy_type,
+            "strategy_params": strategy_params or {},
+            "top5": top5,
+        }
+        with open(top5_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        logger.info("Top5结果已保存: 策略=%s, Top1=%s", strategy_type, top5[0]["code"] if top5 else "")
+
+    def get_top5_result(self) -> dict[str, Any] | None:
+        top5_path = Path(_TOP5_RESULT_FILE)
+        if not top5_path.exists():
+            return None
+        try:
+            with open(top5_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return None

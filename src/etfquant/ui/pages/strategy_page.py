@@ -95,74 +95,72 @@ def create_strategy_page(config: ETFQuantConfig) -> None:
             template_list = ui.column().classes("full-width")
 
         with splitter.after:
-            with ui.splitter(value=65, horizontal=True).classes("full-width").style("height: 100%") as inner_splitter:
-                with inner_splitter.before:
-                    with ui.column().classes("full-width q-pa-md").style("height: 100%; overflow-y: auto;"):
-                        with ui.row().classes("full-width items-center justify-between q-mb-sm"):
-                            name_input = ui.input(value="my_strategy", placeholder="策略名称（字母数字下划线）").props("dense outlined").classes("q-mr-md").style("max-width: 280px")
-                            ui.button("💾 保存", on_click=lambda: _save(), color="primary").props("flat dense").style("color: #58a6ff")
-                            ui.button("🗑 删除", on_click=lambda: _confirm_delete(), color="negative").props("flat dense").style("color: #f85149")
-                            status_label = ui.label("").classes("text-body2 q-ml-md").style("color: #8b949e")
+            with ui.column().classes("full-width").style("height: 100%; overflow-y: auto;"):
+                with ui.card().classes("full-width q-mb-sm").style("background: #161b22; border: 1px solid #30363d;"):
+                    with ui.row().classes("full-width items-center justify-between q-mb-sm"):
+                        name_input = ui.input(value="my_strategy", placeholder="策略名称（字母数字下划线）").props("dense outlined").classes("q-mr-md").style("max-width: 280px")
+                        ui.button("💾 保存", on_click=lambda: _save(), color="primary").props("flat dense").style("color: #58a6ff")
+                        ui.button("🗑 删除", on_click=lambda: _confirm_delete(), color="negative").props("flat dense").style("color: #f85149")
+                        status_label = ui.label("").classes("text-body2 q-ml-md").style("color: #8b949e")
 
-                        with ui.expansion("⚙️ 回测参数", icon="tune").classes("full-width q-mb-sm").style("border: 1px solid #30363d; border-radius: 8px;"):
-                            with ui.row().classes("full-width wrap items-center"):
-                                etf_options = _load_etf_options(config)
-                                etf_labels = [o["label"] for o in etf_options] if etf_options else [config.backtest.benchmark]
-                                default_label = next((o["label"] for o in etf_options if o["value"] == config.backtest.benchmark), etf_labels[0] if etf_labels else config.backtest.benchmark)
-                                code_select = ui.select(
-                                    label="回测ETF",
-                                    options=etf_labels,
-                                    value=default_label,
-                                    with_input=True,
-                                    new_value_mode="add",
-                                ).classes("q-mr-md q-mb-sm").style("min-width: 220px")
-                                start_date_input = ui.input(label="开始日期", value="20160101", placeholder="YYYYMMDD").props("dense outlined").classes("q-mr-md q-mb-sm").style("min-width: 140px")
-                                end_date_input = ui.input(label="结束日期", value=_prev_trading_day(), placeholder="YYYYMMDD").props("dense outlined").classes("q-mr-md q-mb-sm").style("min-width: 140px")
-                                capital_input = ui.number(label="初始资金", value=config.backtest.initial_capital, min=1000, step=10000).props("dense outlined").classes("q-mr-md q-mb-sm").style("min-width: 140px")
-                                commission_input = ui.number(label="佣金率", value=config.backtest.commission_rate, format="%.5f", step=0.0001).props("dense outlined").classes("q-mr-md q-mb-sm").style("min-width: 120px")
-                                slippage_input = ui.number(label="滑点率", value=config.backtest.slippage_rate, format="%.5f", step=0.0001).props("dense outlined").classes("q-mr-md q-mb-sm").style("min-width: 120px")
+                    with ui.expansion("⚙️ 回测参数", icon="tune").classes("full-width q-mb-sm").style("border: 1px solid #30363d; border-radius: 8px;"):
+                        with ui.row().classes("full-width wrap items-center"):
+                            etf_options = _load_etf_options(config)
+                            etf_labels = [o["label"] for o in etf_options] if etf_options else [config.backtest.benchmark]
+                            default_label = next((o["label"] for o in etf_options if o["value"] == config.backtest.benchmark), etf_labels[0] if etf_labels else config.backtest.benchmark)
+                            code_select = ui.select(
+                                label="回测ETF",
+                                options=etf_labels,
+                                value=default_label,
+                                with_input=True,
+                                new_value_mode="add",
+                            ).classes("q-mr-md q-mb-sm").style("min-width: 220px")
+                            start_date_input = ui.input(label="开始日期", value="20160101", placeholder="YYYYMMDD").props("dense outlined").classes("q-mr-md q-mb-sm").style("min-width: 140px")
+                            end_date_input = ui.input(label="结束日期", value=_prev_trading_day(), placeholder="YYYYMMDD").props("dense outlined").classes("q-mr-md q-mb-sm").style("min-width: 140px")
+                            capital_input = ui.number(label="初始资金", value=config.backtest.initial_capital, min=1000, step=10000).props("dense outlined").classes("q-mr-md q-mb-sm").style("min-width: 140px")
+                            commission_input = ui.number(label="佣金率", value=config.backtest.commission_rate, format="%.5f", step=0.0001).props("dense outlined").classes("q-mr-md q-mb-sm").style("min-width: 120px")
+                            slippage_input = ui.number(label="滑点率", value=config.backtest.slippage_rate, format="%.5f", step=0.0001).props("dense outlined").classes("q-mr-md q-mb-sm").style("min-width: 120px")
 
-                        with ui.row().classes("full-width items-center q-mb-sm"):
-                            ui.button("▶ 运行回测", on_click=lambda: _run_backtest(), color="positive").props("flat dense").style("color: #3fb950")
-                            run_status = ui.label("").classes("text-body2 q-ml-md").style("color: #8b949e")
+                    with ui.row().classes("full-width items-center q-mb-sm"):
+                        ui.button("▶ 运行回测", on_click=lambda: _run_backtest(), color="positive").props("flat dense").style("color: #3fb950")
+                        run_status = ui.label("").classes("text-body2 q-ml-md").style("color: #8b949e")
 
-                        code_editor = ui.codemirror(
-                            value="",
-                            language="Python",
-                            theme="githubDark",
-                            line_wrapping=True,
-                        ).classes("full-width").style("min-height: 360px")
+                    code_editor = ui.codemirror(
+                        value="",
+                        language="Python",
+                        theme="githubDark",
+                        line_wrapping=True,
+                    ).classes("full-width").style("min-height: 360px")
 
-                        with ui.expansion("📖 策略编写说明", icon="help_outline").classes("full-width q-mt-sm").style("border: 1px solid #30363d; border-radius: 8px;"):
-                            ui.markdown(
-                                "**策略结构：**\n\n"
-                                "```python\n"
-                                "def initialize(context, data):\n"
-                                "    context.fast_period = 5  # 设置参数\n\n"
-                                "def handle_data(context, data):\n"
-                                "    # data.close / data.open / data.high / data.low\n"
-                                "    # data.volume / data.nav / data.premium_rate\n"
-                                "    # context.position (当前持仓股数)\n"
-                                "    # context.xxx (initialize中设置的自定义参数)\n"
-                                "    order_target_percent(context, 0.95)  # 买入95%\n"
-                                "    order_target_percent(context, 0)     # 清仓\n"
-                                "```\n\n"
-                                "**可用数据：** `data.close`, `data.open`, `data.high`, `data.low`, "
-                                "`data.volume`, `data.nav`, `data.premium_rate`（均为 pandas Series）\n\n"
-                                "**可用函数：** `order_target_percent(context, percent)` — 调整仓位至指定比例\n\n"
-                                "**context 属性：** `context.position` 当前持仓股数；可在 `initialize` 中设置任意自定义参数"
-                            ).style("color: #8b949e; font-size: 12px; line-height: 1.6;")
+                    with ui.expansion("📖 策略编写说明", icon="help_outline").classes("full-width q-mt-sm").style("border: 1px solid #30363d; border-radius: 8px;"):
+                        ui.markdown(
+                            "**策略结构：**\n\n"
+                            "```python\n"
+                            "def initialize(context, data):\n"
+                            "    context.fast_period = 5  # 设置参数\n\n"
+                            "def handle_data(context, data):\n"
+                            "    # data.close / data.open / data.high / data.low\n"
+                            "    # data.volume / data.nav / data.premium_rate\n"
+                            "    # context.position (当前持仓股数)\n"
+                            "    # context.xxx (initialize中设置的自定义参数)\n"
+                            "    order_target_percent(context, 0.95)  # 买入95%\n"
+                            "    order_target_percent(context, 0)     # 清仓\n"
+                            "```\n\n"
+                            "**可用数据：** `data.close`, `data.open`, `data.high`, `data.low`, "
+                            "`data.volume`, `data.nav`, `data.premium_rate`（均为 pandas Series）\n\n"
+                            "**可用函数：** `order_target_percent(context, percent)` — 调整仓位至指定比例\n\n"
+                            "**context 属性：** `context.position` 当前持仓股数；可在 `initialize` 中设置任意自定义参数"
+                        ).style("color: #8b949e; font-size: 12px; line-height: 1.6;")
 
-                        result_container = ui.column().classes("full-width q-mt-md")
+                    result_container = ui.column().classes("full-width q-mt-md")
 
-                with inner_splitter.after:
-                    with ui.column().classes("full-width q-pa-sm").style("height: 100%; overflow-y: auto;"):
-                        ui.label("📜 回测历史").classes("text-subtitle1 q-mb-sm").style("color: #58a6ff")
-                        history_list = ui.column().classes("full-width")
+                with ui.card().classes("full-width q-mb-sm").style("background: #161b22; border: 1px solid #30363d;"):
+                    ui.label("📜 回测历史").classes("text-subtitle1 q-mb-sm").style("color: #58a6ff")
+                    history_list = ui.column().classes("full-width").style("max-height: 300px; overflow-y: auto;")
 
-                        ui.separator().classes("q-my-md")
-                        ui.label("🖥 终端日志").classes("text-subtitle1 q-mb-sm").style("color: #58a6ff")
-                        log_container = ui.column().classes("full-width").style("flex: 1; min-height: 300px; background: #0d1117; border: 1px solid #30363d; border-radius: 4px; padding: 8px; overflow-y: auto;")
+                with ui.card().classes("full-width").style("background: #161b22; border: 1px solid #30363d;"):
+                    ui.label("🖥 终端日志").classes("text-subtitle1 q-mb-sm").style("color: #58a6ff")
+                    log_container = ui.column().classes("full-width").style("min-height: 200px; max-height: 300px; background: #0d1117; border: 1px solid #30363d; border-radius: 4px; padding: 8px; overflow-y: auto;")
 
     current_strategy_id = {"value": ""}
     log_lines: list[str] = []

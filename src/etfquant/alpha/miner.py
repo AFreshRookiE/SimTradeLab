@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import random
+import re
 import threading
 import time
 import warnings
@@ -9,6 +10,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 import numpy as np
+import pandas as pd
 
 from etfquant.alpha.calculator import ETFAlphaCalculator
 from etfquant.core.config import AlphaConfig
@@ -68,6 +70,14 @@ _UNARY_OPS = [
     ("ts_delta({x}, {d})", "ts_delta"),
     ("ts_return({x}, {d})", "ts_return"),
     ("ts_delay({x}, {d})", "ts_delay"),
+    ("1 / ({x} + 1e-8)", "inverse"),
+    ("ts_argmax({x}, {w})", "ts_argmax"),
+    ("ts_argmin({x}, {w})", "ts_argmin"),
+    ("ts_skewness({x}, {w})", "ts_skewness"),
+    ("ts_kurtosis({x}, {w})", "ts_kurtosis"),
+    ("ts_median({x}, {w})", "ts_median"),
+    ("ts_moment({x}, {w}, 2)", "ts_moment2"),
+    ("ts_decay_linear({x}, {w})", "ts_decay_linear"),
 ]
 
 _BINARY_OPS = [
@@ -75,6 +85,10 @@ _BINARY_OPS = [
     ("({a} - {b})", "-"),
     ("({a} * {b})", "*"),
     ("({a} / ({b} + 1e-8))", "/"),
+    ("ts_corr({a}, {b}, {w})", "ts_corr"),
+    ("ts_cov({a}, {b}, {w})", "ts_cov"),
+    ("max({a}, {b})", "max"),
+    ("min({a}, {b})", "min"),
 ]
 
 _ETF_UNARY_OPS = [
@@ -99,11 +113,19 @@ _HIGH_VALUE_TEMPLATES = [
     "ts_rank({x}, {w1}) * ts_rank({y}, {w2})",
     "ts_delta({x}, {d}) * sign(premium_rate())",
     "ts_std({x}, {w1}) / (ts_mean({x}, {w1}) + 1e-8)",
+    "ts_decay_linear({x}, {w1}) - ts_delay({x}, {d})",
+    "ts_skewness({x}, {w1}) * sign(ts_delta({x}, {d}))",
+    "ts_corr({x}, volume, {w1})",
+    "ts_rank({x}, {w1}) / (ts_std({x}, {w2}) + 1e-8)",
+    "ts_delta({x}, {d}) / (abs({x}) + 1e-8)",
 ]
 
-_OP_NAMES = [t[1] for t in _UNARY_OPS] + [t[1] for t in _ETF_UNARY_OPS]
+_OP_NAMES = [t[1] for t in _UNARY_OPS] + [t[1] for t in _ETF_UNARY_OPS] + [t[1] for t in _BINARY_OPS]
 
-_WINDOW_OPS = {"ts_mean", "ts_std", "ts_rank", "ts_sum", "ts_max", "ts_min"}
+_WINDOW_OPS = {"ts_mean", "ts_std", "ts_rank", "ts_sum", "ts_max", "ts_min",
+               "ts_argmax", "ts_argmin", "ts_skewness", "ts_kurtosis",
+               "ts_median", "ts_moment2", "ts_decay_linear",
+               "ts_corr", "ts_cov"}
 _DELTA_OPS = {"ts_delta", "ts_return", "ts_delay"}
 
 
@@ -242,7 +264,7 @@ class ExpressionGenerator:
         right_fn = self._rng.choice([self.generate_simple, self.random_etf_op])
         right = right_fn()
         template, bin_name = self._rng.choice(_BINARY_OPS)
-        expr = template.format(a=left, b=right)
+        expr = self._format_binary(template, left, right)
         if self._rng.random() < 0.3:
             op = self._select_op(bin_name, [t[1] for t in _UNARY_OPS])
             expr = self._apply_op_by_name(op, expr)
@@ -280,7 +302,7 @@ class ExpressionGenerator:
         elif choice < 0.45:
             other = self._rng.choice([self.generate_simple, self.random_etf_op])
             template, _ = self._rng.choice(_BINARY_OPS)
-            return template.format(a=expr, b=other())
+            return self._format_binary(template, expr, other())
         elif choice < 0.65:
             for w in _WINDOWS:
                 if f", {w})" in expr:
@@ -302,6 +324,12 @@ class ExpressionGenerator:
         else:
             return self.generate()
 
+    def _format_binary(self, template: str, a: str, b: str) -> str:
+        fmt_kwargs = {"a": a, "b": b}
+        if "{w}" in template:
+            fmt_kwargs["w"] = self.random_window()
+        return template.format(**fmt_kwargs)
+
     def crossover(self, a: str, b: str) -> str:
         parts_a = self._split_at_shallowest(a)
         parts_b = self._split_at_shallowest(b)
@@ -309,18 +337,18 @@ class ExpressionGenerator:
             pa = self._rng.choice(parts_a)
             pb = self._rng.choice(parts_b)
             template, _ = self._rng.choice(_BINARY_OPS)
-            child = template.format(a=pa, b=pb)
+            child = self._format_binary(template, pa, pb)
         elif parts_a:
             pa = self._rng.choice(parts_a)
             template, _ = self._rng.choice(_BINARY_OPS)
-            child = template.format(a=pa, b=b)
+            child = self._format_binary(template, pa, b)
         elif parts_b:
             pb = self._rng.choice(parts_b)
             template, _ = self._rng.choice(_BINARY_OPS)
-            child = template.format(a=a, b=pb)
+            child = self._format_binary(template, a, pb)
         else:
             template, _ = self._rng.choice(_BINARY_OPS)
-            child = template.format(a=a, b=b)
+            child = self._format_binary(template, a, b)
         if self._rng.random() < 0.3:
             op = self._select_op(None, [t[1] for t in _UNARY_OPS])
             child = self._apply_op_by_name(op, child)
@@ -367,6 +395,91 @@ class ExpressionGenerator:
         return parts if len(parts) >= 2 else []
 
 
+class SmartParameterTuner:
+    """智能参数微调器：基于语法分析提取参数位置，精确替换生成候选。
+
+    替代原有的四层嵌套暴力搜索（4×4×4×4=256次），通过：
+    1. 正则提取表达式中所有数值参数及其上下文
+    2. 区分窗口参数（_WINDOW_OPS）和delta参数（_DELTA_OPS）
+    3. 对每个参数位置独立生成少量高质量候选值
+    4. 精确位置替换，避免全局replace的误匹配
+
+    复杂度从 O(n⁴) 降至 O(k·m)，k=参数位置数，m=每位置候选数（≤4）。
+    """
+
+    _WINDOW_PARAM_RE = re.compile(
+        r'(ts_mean|ts_std|ts_rank|ts_sum|ts_max|ts_min|ts_argmax|ts_argmin'
+        r'|ts_skewness|ts_kurtosis|ts_median|ts_moment|ts_decay_linear'
+        r'|ts_corr|ts_cov)\([^,]+,\s*(\d+)\)'
+    )
+    _DELTA_PARAM_RE = re.compile(
+        r'(ts_delta|ts_return|ts_delay)\([^,]+,\s*(\d+)\)'
+    )
+
+    def __init__(self, windows: list[int], deltas: list[int],
+                 rng: random.Random, seen: set[str],
+                 max_candidates_per_expr: int = 24) -> None:
+        self._windows = windows
+        self._deltas = deltas
+        self._rng = rng
+        self._seen = seen
+        self._max_candidates = max_candidates_per_expr
+
+    def generate_candidates(self, expr: str) -> list[str]:
+        positions = self._analyze_parameters(expr)
+        if not positions:
+            return []
+
+        candidates: list[str] = []
+        for pos in positions:
+            for new_val in self._smart_values(pos):
+                new_expr = self._replace_at(expr, pos, new_val)
+                if new_expr != expr and new_expr not in self._seen:
+                    self._seen.add(new_expr)
+                    candidates.append(new_expr)
+                    if len(candidates) >= self._max_candidates:
+                        return candidates
+        return candidates
+
+    def _analyze_parameters(self, expr: str) -> list[dict[str, Any]]:
+        positions: list[dict[str, Any]] = []
+        for m in self._WINDOW_PARAM_RE.finditer(expr):
+            positions.append({
+                "type": "window",
+                "func": m.group(1),
+                "current": int(m.group(2)),
+                "start": m.start(2),
+                "end": m.end(2),
+            })
+        for m in self._DELTA_PARAM_RE.finditer(expr):
+            positions.append({
+                "type": "delta",
+                "func": m.group(1),
+                "current": int(m.group(2)),
+                "start": m.start(2),
+                "end": m.end(2),
+            })
+        return positions
+
+    def _smart_values(self, pos: dict[str, Any]) -> list[int]:
+        current = pos["current"]
+        if pos["type"] == "window":
+            pool = [w for w in self._windows if w != current]
+            nearby = sorted(pool, key=lambda w: abs(w - current))[:3]
+            if len(pool) > 3:
+                nearby.append(self._rng.choice(pool))
+            return nearby
+        else:
+            pool = [d for d in self._deltas if d != current]
+            nearby = sorted(pool, key=lambda d: abs(d - current))[:3]
+            if len(pool) > 3:
+                nearby.append(self._rng.choice(pool))
+            return nearby
+
+    def _replace_at(self, expr: str, pos: dict[str, Any], new_val: int) -> str:
+        return expr[:pos["start"]] + str(new_val) + expr[pos["end"]:]
+
+
 class FactorMiner:
     """因子挖掘引擎：UCB1引导搜索 + 遗传编程 + 表达式预筛选。
 
@@ -404,6 +517,8 @@ class FactorMiner:
         return self._cancel_event.is_set()
 
     def _quick_prescreen(self, expr: str) -> bool:
+        if self._cancel_event.is_set():
+            return False
         if not self._prescreen_codes:
             return True
         try:
@@ -445,6 +560,7 @@ class FactorMiner:
         result = MiningResult()
         factor_idx = 0
         valid_expressions: dict[str, dict[str, Any]] = {}
+        valid_factor_values: dict[str, pd.Series] = {}
         total_budget = self._config.n_steps * self._config.batch_size
         evaluated_count = 0
         last_report_time = start_time
@@ -464,6 +580,8 @@ class FactorMiner:
 
         def _eval_and_record(expr: str, step: int | None = None, desc_prefix: str = "UCB1搜索") -> float:
             nonlocal evaluated_count, factor_idx
+            if self._cancel_event.is_set():
+                return 0.0
             if not self._quick_prescreen(expr):
                 result.total_skipped += 1
                 _report()
@@ -474,6 +592,25 @@ class FactorMiner:
             is_valid = self._is_valid(ic, ric, icir, ic_p)
             self._gen.record_result(expr, ic, is_valid)
             if is_valid:
+                is_redundant = False
+                try:
+                    new_vals = self._calc._evaluate_expression(expr, self._prescreen_codes[0]) if self._prescreen_codes else None
+                    if new_vals is not None and not new_vals.empty and new_vals.std() > 1e-10:
+                        for existing_name, existing_vals in valid_factor_values.items():
+                            merged = pd.concat([new_vals, existing_vals], axis=1).dropna()
+                            if len(merged) > 30:
+                                corr = abs(merged.iloc[:, 0].corr(merged.iloc[:, 1], method="spearman"))
+                                if corr > 0.95:
+                                    is_redundant = True
+                                    result.total_skipped += 1
+                                    break
+                        if not is_redundant:
+                            valid_factor_values[name] = new_vals
+                except Exception:
+                    pass
+                if is_redundant:
+                    _report()
+                    return 0.0
                 name = self._make_factor_name(expr, factor_idx)
                 factor_idx += 1
                 desc = f"{desc_prefix}发现 (第{evaluated_count}个表达式"
@@ -637,7 +774,7 @@ class FactorMiner:
                 logger.info("因子组合搜索完成: 尝试%d个组合", combo_count)
 
         if self._config.strategy == "模因搜索":
-            logger.info("开始模因搜索: 遗传搜索+局部参数微调")
+            logger.info("开始模因搜索: 遗传搜索+智能参数微调")
             if not self._population:
                 for _ in range(min(100, self._config.batch_size)):
                     if time.time() - start_time > timeout:
@@ -649,6 +786,7 @@ class FactorMiner:
 
             n_generations = min(self._config.n_steps // 10, 200)
             population_size = min(self._config.batch_size, 64)
+            param_tuner = SmartParameterTuner(_WINDOWS, _DELTAS, self._rng, self._seen)
 
             for gen in range(n_generations):
                 if self._cancel_event.is_set():
@@ -679,49 +817,41 @@ class FactorMiner:
                         break
                     best_expr_local = expr
                     best_ic_local = score
-                    for w in _WINDOWS:
-                        for d in _DELTAS:
-                            for old_w in _WINDOWS:
-                                candidate = expr.replace(f", {old_w})", f", {w})")
-                                if candidate == expr:
-                                    continue
-                                for old_d in _DELTAS:
-                                    candidate2 = candidate.replace(f", {old_d})", f", {d})")
-                                    if candidate2 in self._seen:
-                                        continue
-                                    self._seen.add(candidate2)
-                                    ic_val = self._quick_prescreen(candidate2)
-                                    if ic_val is False:
-                                        continue
-                                    ic, ric, icir, ic_p = self._evaluate_expression(candidate2)
-                                    evaluated_count += 1
-                                    result.total_evaluated += 1
-                                    is_valid = self._is_valid(ic, ric, icir, ic_p)
-                                    self._gen.record_result(candidate2, ic, is_valid)
-                                    if abs(ic) > abs(best_ic_local):
-                                        best_expr_local = candidate2
-                                        best_ic_local = abs(ic)
-                                    if is_valid:
-                                        name = self._make_factor_name(candidate2, factor_idx)
-                                        factor_idx += 1
-                                        factor_dict = {
-                                            "name": name, "expression": candidate2,
-                                            "ic": ic, "rank_ic": ric, "icir": icir,
-                                            "is_valid": True, "category": "mined",
-                                            "description": f"模因搜索发现(局部微调)",
-                                        }
-                                        valid_expressions[candidate2] = factor_dict
-                                        self._population.append((candidate2, abs(ic)))
-                                        result.total_valid += 1
-                                        if abs(ic) > abs(self._best_ic):
-                                            self._best_ic = ic
-                                            self._best_expr = candidate2
-                                        if on_discover:
-                                            try:
-                                                on_discover(factor_dict)
-                                            except Exception as exc:
-                                                logger.warning("on_discover回调异常: %s", exc)
-                                    _report()
+                    for candidate in param_tuner.generate_candidates(expr):
+                        if self._cancel_event.is_set() or time.time() - start_time > timeout:
+                            break
+                        ic_val = self._quick_prescreen(candidate)
+                        if ic_val is False:
+                            continue
+                        ic, ric, icir, ic_p = self._evaluate_expression(candidate)
+                        evaluated_count += 1
+                        result.total_evaluated += 1
+                        is_valid = self._is_valid(ic, ric, icir, ic_p)
+                        self._gen.record_result(candidate, ic, is_valid)
+                        if abs(ic) > abs(best_ic_local):
+                            best_expr_local = candidate
+                            best_ic_local = abs(ic)
+                        if is_valid:
+                            name = self._make_factor_name(candidate, factor_idx)
+                            factor_idx += 1
+                            factor_dict = {
+                                "name": name, "expression": candidate,
+                                "ic": ic, "rank_ic": ric, "icir": icir,
+                                "is_valid": True, "category": "mined",
+                                "description": "模因搜索发现(智能微调)",
+                            }
+                            valid_expressions[candidate] = factor_dict
+                            self._population.append((candidate, abs(ic)))
+                            result.total_valid += 1
+                            if abs(ic) > abs(self._best_ic):
+                                self._best_ic = ic
+                                self._best_expr = candidate
+                            if on_discover:
+                                try:
+                                    on_discover(factor_dict)
+                                except Exception as exc:
+                                    logger.warning("on_discover回调异常: %s", exc)
+                        _report()
                     memetic_offspring.append((best_expr_local, best_ic_local))
 
                 self._population = memetic_offspring

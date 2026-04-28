@@ -6,6 +6,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
+import pandas as pd
+
 from etfquant.alpha.calculator import AlphaFactor, AlphaPool, ETFAlphaCalculator, PresetFactors
 from etfquant.alpha.factor_store import FactorStore
 from etfquant.alpha.miner import FactorMiner, MiningConfig
@@ -201,6 +203,104 @@ class FactorService:
         logger.info("重新校验: %d个因子有效性变更 (规则: IC>=%.3f, ICIR>=%.2f)", updated, ic_t, icir_t)
         return {"total": len(all_factors), "updated": updated}
 
+    def find_redundant_factors(self, corr_threshold: float = 0.95) -> list[dict[str, Any]]:
+        all_factors = self._store.list_all()
+        if len(all_factors) < 2:
+            return []
+        valid_factors = [f for f in all_factors if f.get("is_valid")]
+        if len(valid_factors) < 2:
+            return []
+        bridge = DataBridge(self._data_config)
+        etf_codes = bridge.list_etf_codes()
+        from etfquant.alpha.calculator import ETFAlphaCalculator
+        calc = ETFAlphaCalculator(bridge, self._config)
+
+        n_sample = min(10, len(etf_codes))
+        sample_codes = etf_codes[:n_sample]
+        min_rows_per_etf = 50
+
+        etf_factor_values: dict[str, dict[str, pd.Series]] = {}
+        for code in sample_codes:
+            code_vals: dict[str, pd.Series] = {}
+            for f in valid_factors:
+                try:
+                    vals = calc._evaluate_expression(f["expression"], code)
+                    if vals is not None and not vals.empty and vals.std() > 1e-10 and vals.notna().sum() >= min_rows_per_etf:
+                        code_vals[f["name"]] = vals
+                except Exception:
+                    pass
+            if len(code_vals) >= 2:
+                etf_factor_values[code] = code_vals
+            logger.debug("ETF %s: %d/%d 因子有足够数据", code, len(code_vals), len(valid_factors))
+
+        if not etf_factor_values:
+            logger.warning("所有采样ETF均无足够数据计算因子相关性")
+            return []
+
+        names = list(set(n for vals in etf_factor_values.values() for n in vals.keys()))
+        if len(names) < 2:
+            return []
+
+        pair_corrs: dict[tuple[str, str], list[float]] = {}
+        for code, code_vals in etf_factor_values.items():
+            code_names = [n for n in names if n in code_vals]
+            for i in range(len(code_names)):
+                for j in range(i + 1, len(code_names)):
+                    n1, n2 = code_names[i], code_names[j]
+                    key = (min(n1, n2), max(n1, n2))
+                    s1 = code_vals[n1]
+                    s2 = code_vals[n2]
+                    merged = pd.concat([s1, s2], axis=1).dropna()
+                    if len(merged) < 20:
+                        continue
+                    corr = abs(merged.iloc[:, 0].corr(merged.iloc[:, 1], method="spearman"))
+                    pair_corrs.setdefault(key, []).append(corr)
+
+        avg_corr_cache: dict[tuple[str, str], float] = {}
+        for key, corrs in pair_corrs.items():
+            avg_corr_cache[key] = sum(corrs) / len(corrs)
+            logger.debug("  %s vs %s: avg_corr=%.4f (from %d ETFs)", key[0], key[1], avg_corr_cache[key], len(corrs))
+
+        visited: set[str] = set()
+        groups: list[dict[str, Any]] = []
+        for name in names:
+            if name in visited:
+                continue
+            group = [name]
+            visited.add(name)
+            for other in names:
+                if other in visited:
+                    continue
+                key = (min(name, other), max(name, other))
+                if avg_corr_cache.get(key, 0.0) >= corr_threshold:
+                    group.append(other)
+                    visited.add(other)
+            if len(group) > 1:
+                group_factors = [f for f in valid_factors if f["name"] in group]
+                group_factors.sort(key=lambda x: abs(x.get("ic", 0)), reverse=True)
+                max_corr = 0.0
+                for other in group[1:]:
+                    key = (min(group[0], other), max(group[0], other))
+                    max_corr = max(max_corr, avg_corr_cache.get(key, 0.0))
+                groups.append({
+                    "keep": group_factors[0]["name"],
+                    "keep_ic": group_factors[0].get("ic", 0),
+                    "remove": [g["name"] for g in group_factors[1:]],
+                    "remove_count": len(group_factors) - 1,
+                    "max_corr": round(max_corr, 4),
+                })
+        logger.info("同质因子检测: %d个因子, %d组同质 (阈值=%.2f)", len(names), len(groups), corr_threshold)
+        return groups
+
+    def remove_redundant_factors(self, groups: list[dict[str, Any]]) -> int:
+        removed = 0
+        for g in groups:
+            for name in g.get("remove", []):
+                self._store.delete(name)
+                removed += 1
+        logger.info("清空同质因子: 删除%d个冗余因子, 保留%d组代表", removed, len(groups))
+        return removed
+
     def generate_preset_factors(self, ic_threshold: float | None = None, rank_ic_threshold: float | None = None,
                                 icir_threshold: float | None = None, target_period: int | None = None,
                                 max_etf_for_ic: int | None = None, max_etf_for_mutual_ic: int | None = None,
@@ -337,6 +437,7 @@ class FactorService:
                     category=f_dict.get("category", "custom"),
                 )
                 self._store.upsert(factor)
+            was_cancelled = miner.is_cancelled
             result = {
                 "total_evaluated": mining_result.total_evaluated,
                 "total_valid": mining_result.total_valid,
@@ -345,6 +446,7 @@ class FactorService:
                 "best_ic": mining_result.best_ic,
                 "best_expression": mining_result.best_expression,
                 "factors": mining_result.discovered,
+                "cancelled": was_cancelled,
             }
             with self._mining_lock:
                 self._mining_state["running"] = False
@@ -461,7 +563,6 @@ class FactorService:
         ]
 
     def export_factors(self, path: str | None = None) -> str:
-        import pandas as pd
         rows = self._store.list_all()
         if not rows:
             return ""
